@@ -245,7 +245,7 @@ func stage8(ctx *runner.Context) []model.CheckResult {
 				return ok, fmt.Sprintf("exit=%d; termios unavailable, skipped ICANON/ECHO check", rc), data, nil
 			}
 			mask := uint64(unix.ICANON | unix.ECHO)
-			ok := (lflag&mask) == mask
+			ok := (lflag & mask) == mask
 			wantFail := len(extra) > 0 && strings.Contains(strings.Join(extra, " "), "missing")
 			if wantFail {
 				ok = rc != 0 && ok
@@ -786,6 +786,15 @@ func stage20(ctx *runner.Context) []model.CheckResult {
 
 // ---------- stage 32 ----------
 
+var logLineRE = regexp.MustCompile(`LOG\d{2}`)
+
+func tailOneIsBounded(full, one []byte) bool {
+	return len(one) < len(full) &&
+		bytes.Contains(one, []byte("LOG20")) &&
+		!bytes.Contains(one, []byte("LOG19")) &&
+		len(logLineRE.FindAll(one, -1)) == 1
+}
+
 func stage32(ctx *runner.Context) []model.CheckResult {
 	var out []model.CheckResult
 	out = append(out, single(ctx, "logs returns recent output without attaching", func() (bool, string, []byte, []byte) {
@@ -817,7 +826,7 @@ func stage32(ctx *runner.Context) []model.CheckResult {
 			return false, fmt.Sprintf("tail100 exit=%d; tail1 exit=%d", full.ReturnCode, one.ReturnCode), so, se
 		}
 		hasLast := bytes.Contains(full.Stdout, []byte("LOG20")) && bytes.Contains(one.Stdout, []byte("LOG20"))
-		bounded := len(one.Stdout) <= len(full.Stdout)
+		bounded := tailOneIsBounded(full.Stdout, one.Stdout)
 		// Wait for exit, then query the retained record.
 		time.Sleep(2200 * time.Millisecond)
 		after := ctx.RunAction("logs", map[string]string{"name": name, "tail": "100"}, nil, nil, 0)
@@ -841,9 +850,9 @@ func stage33(ctx *runner.Context) []model.CheckResult {
 			return false, "failed to create session", created.Stdout, created.Stderr
 		}
 		var bad []string
-		_ = filepath.Walk(ctx.Runtime, func(p string, info os.FileInfo, err error) error {
+		walkErr := filepath.Walk(ctx.Runtime, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
-				return nil
+				return err
 			}
 			mode := info.Mode().Perm()
 			if mode&0o077 != 0 {
@@ -852,35 +861,104 @@ func stage33(ctx *runner.Context) []model.CheckResult {
 			}
 			return nil
 		})
-		return len(bad) == 0, fmt.Sprintf("group/world-accessible paths=%v", bad), nil, nil
-	}))
-	out = append(out, single(ctx, "runtime root is 0700 and symlinks are not followed into escapes", func() (bool, string, []byte, []byte) {
-		fi, err := os.Lstat(ctx.Runtime)
+		if walkErr != nil {
+			return false, walkErr.Error(), nil, nil
+		}
+		rootInfo, err := os.Stat(ctx.Runtime)
 		if err != nil {
 			return false, err.Error(), nil, nil
 		}
-		if fi.Mode().Perm()&0o077 != 0 {
-			return false, fmt.Sprintf("runtime root mode=%04o, want 0700", fi.Mode().Perm()), nil, nil
+		rootOK := rootInfo.Mode().Perm() == 0o700
+		return rootOK && len(bad) == 0, fmt.Sprintf("runtime root=%04o; group/world-accessible paths=%v", rootInfo.Mode().Perm(), bad), nil, nil
+	}))
+	out = append(out, single(ctx, "a symlinked runtime path is rejected or safely repaired", func() (bool, string, []byte, []byte) {
+		probe, err := runner.New(ctx.Project, ctx.Config)
+		if err != nil {
+			return false, err.Error(), nil, nil
 		}
-		// Plant a symlink inside the runtime; a session listing must still
-		// succeed and must not traverse the link outside the root.
+		target := probe.Environment("DMUX_RUNTIME_DIR")
+		if target == "" || filepath.Clean(target) == filepath.Clean(probe.Runtime) {
+			probe.Close()
+			return false, "DMUX_RUNTIME_DIR must name an isolated subdirectory", nil, nil
+		}
+		rel, err := filepath.Rel(probe.Runtime, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			probe.Close()
+			return false, fmt.Sprintf("configured runtime path escapes test runtime: %s", target), nil, nil
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil || len(entries) != 0 {
+			probe.Close()
+			return false, fmt.Sprintf("fresh runtime path is not empty: %v", err), nil, nil
+		}
+		if err := os.Remove(target); err != nil {
+			probe.Close()
+			return false, err.Error(), nil, nil
+		}
 		outside, err := os.MkdirTemp("", "dmux-outside-")
 		if err != nil {
+			probe.Close()
 			return false, err.Error(), nil, nil
 		}
-		defer os.RemoveAll(outside)
-		_ = os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("x"), 0o600)
-		link := filepath.Join(ctx.Runtime, "verify-evil-link")
-		_ = os.Remove(link)
-		if err := os.Symlink(outside, link); err != nil {
-			return true, "symlinks unsupported on platform; root mode ok", nil, nil
+		defer func() {
+			probe.Close()
+			_ = os.RemoveAll(outside)
+		}()
+		if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("unchanged"), 0o600); err != nil {
+			return false, err.Error(), nil, nil
 		}
-		defer os.Remove(link)
-		r := ctx.RunAction("list", nil, nil, nil, 0)
-		ok := r.ReturnCode == 0
-		return ok, fmt.Sprintf("list exit=%d with planted symlink", r.ReturnCode), r.Stdout, r.Stderr
+		if err := os.Symlink(outside, target); err != nil {
+			return false, err.Error(), nil, nil
+		}
+		// Point both supported variables at the compromised path so ignoring
+		// one variable cannot make this probe pass accidentally.
+		probe.Env = replaceEnv(probe.Env, "XDG_RUNTIME_DIR", target)
+		probe.Env = replaceEnv(probe.Env, "DMUX_RUNTIME_DIR", target)
+		name := fmt.Sprintf("verify-%d-symlink", os.Getpid())
+		created := probe.NewSession(name, []string{"sleep", "60"}, 3*time.Second)
+		outsideEntries, readErr := os.ReadDir(outside)
+		outsideChanged := readErr != nil || len(outsideEntries) != 1 || outsideEntries[0].Name() != "sentinel"
+		fi, statErr := os.Lstat(target)
+		repaired := statErr == nil && fi.Mode()&os.ModeSymlink == 0 && fi.IsDir() && fi.Mode().Perm()&0o077 == 0
+		rejected := created.ReturnCode != 0
+		ok := !outsideChanged && (rejected || repaired)
+		return ok, fmt.Sprintf("new exit=%d; outside modified=%v; repaired=%v", created.ReturnCode, outsideChanged, repaired), created.Stdout, created.Stderr
+	}))
+	out = append(out, single(ctx, "an insecure pre-existing runtime is rejected or repaired", func() (bool, string, []byte, []byte) {
+		probe, err := runner.New(ctx.Project, ctx.Config)
+		if err != nil {
+			return false, err.Error(), nil, nil
+		}
+		defer probe.Close()
+		target := probe.Environment("DMUX_RUNTIME_DIR")
+		if target == "" {
+			return false, "DMUX_RUNTIME_DIR is not configured", nil, nil
+		}
+		if err := os.Chmod(target, 0o755); err != nil {
+			return false, err.Error(), nil, nil
+		}
+		defer os.Chmod(target, 0o700)
+		probe.Env = replaceEnv(probe.Env, "XDG_RUNTIME_DIR", target)
+		probe.Env = replaceEnv(probe.Env, "DMUX_RUNTIME_DIR", target)
+		r := probe.RunAction("list", nil, nil, nil, 3*time.Second)
+		fi, statErr := os.Stat(target)
+		repaired := statErr == nil && fi.IsDir() && fi.Mode().Perm()&0o077 == 0
+		ok := r.ReturnCode != 0 || repaired
+		return ok, fmt.Sprintf("list exit=%d; repaired=%v", r.ReturnCode, repaired), r.Stdout, r.Stderr
 	}))
 	return out
+}
+
+func replaceEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := append([]string(nil), env...)
+	for i, item := range out {
+		if strings.HasPrefix(item, prefix) {
+			out[i] = prefix + value
+			return out
+		}
+	}
+	return append(out, prefix+value)
 }
 
 // ---------- stage 37 ----------
@@ -954,9 +1032,13 @@ func RunCustomChecks(stage int, ctx *runner.Context) []model.CheckResult {
 				timeout = time.Duration(f * float64(time.Second))
 			}
 		} else {
-			continue
+			name = fmt.Sprintf("custom check %d", i+1)
 		}
 		start := time.Now()
+		if len(command) == 0 || command[0] == "" {
+			results = append(results, ctx.Result(name, false, "custom check command must contain an executable", start, nil, nil))
+			continue
+		}
 		r := ctx.Run(command, nil, timeout, "")
 		results = append(results, ctx.Result(name, r.ReturnCode == 0, fmt.Sprintf("exit=%d; command=%s", r.ReturnCode, strings.Join(command, " ")), start, r.Stdout, r.Stderr))
 	}

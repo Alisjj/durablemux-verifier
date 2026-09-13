@@ -119,14 +119,14 @@ func WaitUntil(pred func() bool, timeout time.Duration) bool {
 }
 
 // CleanupRuntimeProcesses SIGTERMs then SIGKILLs processes whose environ
-// carries the test runtime. Linux (/proc) only; no-op elsewhere.
-func CleanupRuntimeProcesses(runtime string) {
+// carries either exact test runtime. Linux (/proc) only; no-op elsewhere.
+func CleanupRuntimeProcesses(xdgRuntime, dmuxRuntime string) {
 	if _, err := os.Stat("/proc"); err != nil {
 		return
 	}
 	needles := [][]byte{
-		[]byte("XDG_RUNTIME_DIR=" + runtime),
-		[]byte("DMUX_RUNTIME_DIR=" + filepath.Join(runtime, "dmux")),
+		[]byte("XDG_RUNTIME_DIR=" + xdgRuntime),
+		[]byte("DMUX_RUNTIME_DIR=" + dmuxRuntime),
 	}
 	self := os.Getpid()
 	var victims []int

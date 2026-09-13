@@ -108,7 +108,13 @@ func cmdInit(project string, args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	binary := fs.String("binary", "./dmux", "")
 	force := fs.Bool("force", false, "")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
 	root, meta, cfgPath, progPath := projectPaths(project)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -188,12 +194,24 @@ func which(name string) bool {
 	return err == nil
 }
 
-func stageStatus(n int, st *store.Store) string {
+func firstMissingPrerequisite(n int, stages map[int]*model.Stage, st *store.Store) int {
+	for _, prior := range sortedKeys(stages) {
+		if prior >= n {
+			break
+		}
+		if !st.IsPassed(prior) {
+			return prior
+		}
+	}
+	return 0
+}
+
+func stageStatus(n int, stages map[int]*model.Stage, st *store.Store) string {
+	if firstMissingPrerequisite(n, stages, st) != 0 {
+		return "locked"
+	}
 	if st.IsPassed(n) {
 		return "passed"
-	}
-	if n > 1 && !st.IsPassed(n-1) {
-		return "locked"
 	}
 	item := st.Stage(n)
 	if s, ok := item["status"].(string); ok && s != "" {
@@ -208,14 +226,17 @@ func cmdStatus(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	asJSON := false
-	for _, a := range args {
-		if a == "--json" {
-			asJSON = true
-		}
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
 	}
 	keys := sortedKeys(stages)
-	if asJSON {
+	if *asJSON {
 		type row struct {
 			Stage    int    `json:"stage"`
 			Title    string `json:"title"`
@@ -225,7 +246,7 @@ func cmdStatus(project string, args []string) int {
 		}
 		var payload []row
 		for _, n := range keys {
-			payload = append(payload, row{n, stages[n].Title, stages[n].Mode, stageStatus(n, st), st.EvidenceCount(n)})
+			payload = append(payload, row{n, stages[n].Title, stages[n].Mode, stageStatus(n, stages, st), st.EvidenceCount(n)})
 		}
 		data, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Println(string(data))
@@ -233,14 +254,14 @@ func cmdStatus(project string, args []string) int {
 	}
 	passed := 0
 	for _, n := range keys {
-		if st.IsPassed(n) {
+		if stageStatus(n, stages, st) == "passed" {
 			passed++
 		}
 	}
 	fmt.Printf("DurableMux progress: %d/%d stages passed\n\n", passed, len(stages))
 	markers := map[string]string{"passed": "✓", "ready": "→", "failed": "✗", "locked": "·"}
 	for _, n := range keys {
-		status := stageStatus(n, st)
+		status := stageStatus(n, stages, st)
 		m, ok := markers[status]
 		if !ok {
 			m = "·"
@@ -271,7 +292,7 @@ func cmdShow(project string, args []string) int {
 		return 2
 	}
 	fmt.Printf("Stage %d: %s\n", stage.Number, stage.Title)
-	fmt.Printf("%s | mode: %s | status: %s\n", stage.Module, stage.Mode, stageStatus(stage.Number, st))
+	fmt.Printf("%s | mode: %s | status: %s\n", stage.Module, stage.Mode, stageStatus(stage.Number, stages, st))
 	fmt.Printf("\nObjective\n%s\n", stage.Objective)
 	fmt.Printf("\nContract\n%s\n", stage.Contract)
 	if len(stage.AcceptanceTests) > 0 {
@@ -315,8 +336,14 @@ func cmdVerify(project string, args []string) int {
 	for _, a := range args {
 		if a == "--force" {
 			force = true
+		} else if strings.HasPrefix(a, "-") {
+			fmt.Fprintf(os.Stderr, "unknown option: %s\n", a)
+			return 2
 		} else if stageArg == "" {
 			stageArg = a
+		} else {
+			fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", a)
+			return 2
 		}
 	}
 	if stageArg == "" {
@@ -334,8 +361,8 @@ func cmdVerify(project string, args []string) int {
 		return 2
 	}
 	stage := stages[number]
-	if number > 1 && !st.IsPassed(number-1) && !force {
-		fmt.Fprintf(os.Stderr, "Stage %d is locked. Pass stage %d first, or use --force for investigation.\n", number, number-1)
+	if missing := firstMissingPrerequisite(number, stages, st); missing != 0 && !force {
+		fmt.Fprintf(os.Stderr, "Stage %d is locked. Pass stage %d first, or use --force for investigation.\n", number, missing)
 		return 2
 	}
 	bin, _ := cfg["binary"].(string)
@@ -448,17 +475,23 @@ func cmdEvidence(project string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Unknown stage: %d\n", n)
 		return 2
 	}
+	fs := flag.NewFlagSet("evidence", flag.ContinueOnError)
+	fileFlag := fs.String("file", "", "")
+	cmdFlag := fs.String("command", "", "")
+	note := fs.String("note", "", "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
 	evDir := filepath.Join(meta, "evidence", fmt.Sprintf("stage-%02d", n))
 	if err := os.MkdirAll(evDir, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
-	fs := flag.NewFlagSet("evidence", flag.ContinueOnError)
-	fileFlag := fs.String("file", "", "")
-	cmdFlag := fs.String("command", "", "")
-	note := fs.String("note", "", "")
-	_ = fs.Parse(args[1:])
 	record := map[string]any{"at": store.UTCNow(), "note": *note}
 	if *fileFlag != "" {
 		src := *fileFlag
@@ -527,7 +560,13 @@ func cmdApprove(project string, args []string) int {
 	}
 	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
 	note := fs.String("note", "", "")
-	_ = fs.Parse(args[1:])
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
 	if *note == "" {
 		fmt.Fprintln(os.Stderr, "usage: approve <stage> --note \"...\"")
 		return 2
@@ -557,7 +596,13 @@ func cmdApprove(project string, args []string) int {
 func cmdReport(project string, args []string) int {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	output := fs.String("output", "", "")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
 	root, meta, _, stages, st, err := loadAll(project)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -586,7 +631,13 @@ func cmdReport(project string, args []string) int {
 func cmdReset(project string, args []string) int {
 	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
 	stageFlag := fs.Int("stage", 0, "")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
 	if *stageFlag == 0 {
 		fmt.Fprintln(os.Stderr, "Specify --stage N")
 		return 2

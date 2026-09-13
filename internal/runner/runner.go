@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Alisjj/durablemux-verifier/internal/model"
@@ -80,6 +81,10 @@ func New(project string, config map[string]any) (*Context, error) {
 			envMap[kv[:i]] = kv[i+1:]
 		}
 	}
+	// Never inherit the caller's real session runtime when isolation settings
+	// are missing or explicitly removed from a partial configuration.
+	envMap["XDG_RUNTIME_DIR"] = rt
+	envMap["DMUX_RUNTIME_DIR"] = filepath.Join(rt, "dmux")
 	if re, ok := config["runtime_environment"].(map[string]any); ok {
 		for k, v := range re {
 			s, _ := v.(string)
@@ -87,9 +92,16 @@ func New(project string, config map[string]any) (*Context, error) {
 			envMap[k] = s
 		}
 	}
-	// DMUX_RUNTIME_DIR default nests under runtime; ensure parent exists.
-	if dmux, ok := envMap["DMUX_RUNTIME_DIR"]; ok && dmux != "" {
-		_ = os.MkdirAll(dmux, 0o700)
+	for _, key := range []string{"XDG_RUNTIME_DIR", "DMUX_RUNTIME_DIR"} {
+		path := envMap[key]
+		if !withinDir(tmp, path) {
+			os.RemoveAll(tmp)
+			return nil, fmt.Errorf("%s must stay inside the temporary runtime: %s", key, path)
+		}
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			os.RemoveAll(tmp)
+			return nil, err
+		}
 	}
 	env := make([]string, 0, len(envMap))
 	for k, v := range envMap {
@@ -102,6 +114,14 @@ func New(project string, config map[string]any) (*Context, error) {
 	}, nil
 }
 
+func withinDir(base, target string) bool {
+	if target == "" || !filepath.IsAbs(target) {
+		return false
+	}
+	rel, err := filepath.Rel(base, target)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
 // Close kills sessions, stops daemon, cleans runtime procs and temp dir.
 func (c *Context) Close() {
 	for name := range c.Sessions {
@@ -110,7 +130,7 @@ func (c *Context) Close() {
 	if _, ok := c.commands()["daemon_stop"]; ok {
 		_ = c.RunAction("daemon_stop", nil, nil, nil, 2*time.Second)
 	}
-	util.CleanupRuntimeProcesses(c.Runtime)
+	util.CleanupRuntimeProcesses(c.envMap["XDG_RUNTIME_DIR"], c.envMap["DMUX_RUNTIME_DIR"])
 	os.RemoveAll(c.TempDir)
 }
 
@@ -152,6 +172,9 @@ func (c *Context) RunAction(action string, values map[string]string, extra []str
 
 // Run executes argv with env + timeout. Timeout expiry yields exit 124.
 func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd string) CommandOutput {
+	if len(argv) == 0 || argv[0] == "" {
+		return CommandOutput{Argv: argv, ReturnCode: 127, Stderr: []byte("command must contain an executable")}
+	}
 	if timeout <= 0 {
 		timeout = c.Timeout
 	}
@@ -162,6 +185,21 @@ func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd st
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// A broken command can leave descendants holding the output pipes open.
+	// Put each invocation in its own process group, kill that group on timeout,
+	// and bound the final pipe wait even if a descendant escapes the group.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if err == syscall.ESRCH {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = 500 * time.Millisecond
 	cmd.Dir = cwd
 	cmd.Env = c.Env
 	if input != nil {
@@ -174,16 +212,21 @@ func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd st
 	dur := time.Since(start)
 	rc := 0
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			rc = ee.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() == context.DeadlineExceeded {
 			rc = 124
+		} else if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
 		} else {
 			rc = 127
 		}
 	}
 	// exec truncates output on kill; buffers hold what we got.
 	return CommandOutput{Argv: argv, ReturnCode: rc, Stdout: so.Bytes(), Stderr: se.Bytes(), Duration: dur}
+}
+
+// Environment returns one environment value configured for this run.
+func (c *Context) Environment(name string) string {
+	return c.envMap[name]
 }
 
 // SpawnPTY starts action under a PTY.

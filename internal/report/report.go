@@ -14,7 +14,7 @@ func Markdown(stages map[int]*model.Stage, s *store.Store) string {
 	b.WriteString("# DurableMux Verification Report\n\n")
 	passed := 0
 	for n := range stages {
-		if s.IsPassed(n) {
+		if stageStatus(n, stages, s) == "passed" {
 			passed++
 		}
 	}
@@ -24,14 +24,7 @@ func Markdown(stages map[int]*model.Stage, s *store.Store) string {
 	for _, n := range sortedKeys(stages) {
 		st := stages[n]
 		item := s.Stage(n)
-		status, _ := item["status"].(string)
-		if status == "" {
-			if n > 1 && !s.IsPassed(n-1) {
-				status = "locked"
-			} else {
-				status = "ready"
-			}
-		}
+		status := stageStatus(n, stages, s)
 		ev, _ := item["evidence"].([]any)
 		fmt.Fprintf(&b, "| %d | %s | %s | %s | %d |\n", n, st.Title, st.Mode, status, len(ev))
 	}
@@ -76,6 +69,25 @@ func Markdown(stages map[int]*model.Stage, s *store.Store) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func stageStatus(number int, stages map[int]*model.Stage, s *store.Store) string {
+	for _, prior := range sortedKeys(stages) {
+		if prior >= number {
+			break
+		}
+		if !s.IsPassed(prior) {
+			return "locked"
+		}
+	}
+	if s.IsPassed(number) {
+		return "passed"
+	}
+	status, _ := s.Stage(number)["status"].(string)
+	if status != "" {
+		return status
+	}
+	return "ready"
 }
 
 func sortedKeys(stages map[int]*model.Stage) []int {

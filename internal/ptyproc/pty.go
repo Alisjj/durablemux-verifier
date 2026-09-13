@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/creack/pty"
@@ -16,7 +17,14 @@ type Process struct {
 	Master *os.File
 	Buffer []byte
 	Pid    int
-	rc     *int
+
+	readCh    chan []byte
+	readDone  chan struct{}
+	waitCh    chan int
+	closeOnce sync.Once
+	mu        sync.Mutex
+	rc        *int
+	readEOF   bool
 }
 
 // Start launches argv under a PTY sized rows x cols.
@@ -32,7 +40,46 @@ func Start(argv []string, cwd string, env []string, rows, cols int) (*Process, e
 	if err != nil {
 		return nil, err
 	}
-	return &Process{Cmd: cmd, Master: master, Pid: cmd.Process.Pid}, nil
+	p := &Process{
+		Cmd: cmd, Master: master, Pid: cmd.Process.Pid,
+		readCh: make(chan []byte, 1), readDone: make(chan struct{}),
+		waitCh: make(chan int, 1),
+	}
+	go p.readLoop(master)
+	go func() {
+		err := cmd.Wait()
+		code := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else {
+				code = -1
+			}
+		}
+		p.waitCh <- code
+	}()
+	return p, nil
+}
+
+// readLoop is the sole reader of the PTY. A timed-out ReadSome must not leave
+// an abandoned goroutine that can consume and discard future output.
+func (p *Process) readLoop(master *os.File) {
+	defer close(p.readCh)
+	for {
+		buf := make([]byte, 65536)
+		n, err := master.Read(buf)
+		if n > 0 {
+			data := append([]byte(nil), buf[:n]...)
+			select {
+			case p.readCh <- data:
+			case <-p.readDone:
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // SetSize resizes the PTY (also delivers SIGWINCH to the foreground pg).
@@ -48,26 +95,37 @@ func (p *Process) Write(data []byte) error {
 
 // ReadSome non-blocking-ish read with timeout; appends to Buffer.
 func (p *Process) ReadSome(timeout time.Duration) []byte {
-	type res struct {
-		n   int
-		b   []byte
-		err error
+	data, _ := p.readSome(timeout)
+	return data
+}
+
+func (p *Process) readSome(timeout time.Duration) ([]byte, bool) {
+	if p.readEOF {
+		return nil, false
 	}
-	ch := make(chan res, 1)
-	go func() {
-		buf := make([]byte, 65536)
-		n, err := p.Master.Read(buf)
-		ch <- res{n, buf[:max(n, 0)], err}
-	}()
-	select {
-	case r := <-ch:
-		if r.n > 0 {
-			p.Buffer = append(p.Buffer, r.b...)
-			return r.b
+	consume := func(data []byte, ok bool) ([]byte, bool) {
+		if !ok {
+			p.readEOF = true
+			return nil, false
 		}
-		return nil
-	case <-time.After(timeout):
-		return nil
+		p.Buffer = append(p.Buffer, data...)
+		return data, true
+	}
+	if timeout <= 0 {
+		select {
+		case data, ok := <-p.readCh:
+			return consume(data, ok)
+		default:
+			return nil, true
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case data, ok := <-p.readCh:
+		return consume(data, ok)
+	case <-timer.C:
+		return nil, true
 	}
 }
 
@@ -78,10 +136,6 @@ func (p *Process) ReadUntil(needle []byte, timeout time.Duration) ([]byte, error
 		if bytes.Contains(p.Buffer, needle) {
 			return append([]byte(nil), p.Buffer...), nil
 		}
-		if p.Poll() != nil {
-			p.ReadSome(0)
-			break
-		}
 		left := time.Until(deadline)
 		if left > 100*time.Millisecond {
 			left = 100 * time.Millisecond
@@ -89,7 +143,9 @@ func (p *Process) ReadUntil(needle []byte, timeout time.Duration) ([]byte, error
 		if left < 0 {
 			left = 0
 		}
-		p.ReadSome(left)
+		if _, open := p.readSome(left); !open {
+			break
+		}
 	}
 	if !bytes.Contains(p.Buffer, needle) {
 		tail := p.Buffer
@@ -103,46 +159,18 @@ func (p *Process) ReadUntil(needle []byte, timeout time.Duration) ([]byte, error
 
 // Poll returns exit code or nil when running.
 func (p *Process) Poll() *int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.rc != nil {
 		return p.rc
 	}
-	// Non-blocking check via signal 0 + process state.
-	if p.Cmd.ProcessState != nil {
-		code := p.Cmd.ProcessState.ExitCode()
-		p.rc = &code
-		return p.rc
-	}
-	// Reap without blocking: use Wait in goroutine? Instead check with
-	// a zero-timeout wait via channel cached on first call.
 	select {
-	case <-waitChan(p.Cmd):
-		if p.Cmd.ProcessState != nil {
-			code := p.Cmd.ProcessState.ExitCode()
-			p.rc = &code
-		} else {
-			code := 0
-			p.rc = &code
-		}
+	case code := <-p.waitCh:
+		p.rc = &code
 		return p.rc
 	default:
 		return nil
 	}
-}
-
-var waitCache = map[*exec.Cmd]chan struct{}{}
-
-func waitChan(cmd *exec.Cmd) chan struct{} {
-	// NOTE: single-flight per *exec.Cmd; fine for verifier lifetimes.
-	if ch, ok := waitCache[cmd]; ok {
-		return ch
-	}
-	ch := make(chan struct{})
-	waitCache[cmd] = ch
-	go func() {
-		_ = cmd.Wait()
-		close(ch)
-	}()
-	return ch
 }
 
 // Wait blocks until exit or timeout.
@@ -183,15 +211,10 @@ func (p *Process) LFlag() (uint64, error) {
 
 // Close closes the master fd.
 func (p *Process) Close() {
-	if p.Master != nil {
-		_ = p.Master.Close()
-		p.Master = nil
-	}
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	p.closeOnce.Do(func() {
+		close(p.readDone)
+		if p.Master != nil {
+			_ = p.Master.Close()
+		}
+	})
 }
