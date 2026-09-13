@@ -54,6 +54,14 @@ Or run a specific stage:
 
 ## Main commands
 
+Use the built-in help to see every command or the options and examples for one command:
+
+```bash
+dmux-verify help
+dmux-verify help verify
+dmux-verify verify --help
+```
+
 ```bash
 dmux-verify --project ./durablemux status
 dmux-verify --project ./durablemux show 11

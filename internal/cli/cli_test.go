@@ -53,6 +53,90 @@ func runCLI(t *testing.T, bin, project string, args ...string) (int, string, str
 	return rc, soB.String(), seB.String()
 }
 
+func TestTopLevelHelp(t *testing.T) {
+	bin := buildBinary(t)
+	project := t.TempDir()
+	for _, invocation := range [][]string{{"help"}, {"--help"}, {"-h"}} {
+		rc, stdout, stderr := runCLI(t, bin, project, invocation...)
+		if rc != 0 {
+			t.Fatalf("%v returned %d: %s", invocation, rc, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("%v wrote unexpected stderr: %s", invocation, stderr)
+		}
+		for _, want := range []string{
+			"Usage:", "Commands:", "Global options:", "Examples:",
+			"init", "doctor", "status", "show", "verify", "evidence", "approve", "report", "reset", "help",
+			"--project DIR", "--version", "dmux-verify help <command>",
+		} {
+			if !containsFold(stdout, want) {
+				t.Errorf("%v help does not contain %q:\n%s", invocation, want, stdout)
+			}
+		}
+	}
+}
+
+func TestCommandHelp(t *testing.T) {
+	bin := buildBinary(t)
+	project := t.TempDir()
+	tests := []struct {
+		command string
+		want    []string
+	}{
+		{"init", []string{"--binary PATH", "--force"}},
+		{"doctor", []string{"required tools", "target binary"}},
+		{"status", []string{"--json", "machine-readable JSON"}},
+		{"show", []string{"show <stage>", "Acceptance tests"}},
+		{"verify", []string{"verify <stage|next>", "--force"}},
+		{"evidence", []string{"--file PATH", "--command COMMAND", "--note TEXT"}},
+		{"approve", []string{"approve <stage>", "--note TEXT"}},
+		{"report", []string{"--output PATH", ".dmux-verifier/report.md"}},
+		{"reset", []string{"--stage N", "Copied evidence files are not deleted"}},
+		{"help", []string{"help [command]", "detailed help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			rc, topicOutput, stderr := runCLI(t, bin, project, "help", tt.command)
+			if rc != 0 {
+				t.Fatalf("help topic returned %d: %s", rc, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("help topic wrote unexpected stderr: %s", stderr)
+			}
+			for _, want := range append([]string{"Usage:", "Options:", "-h, --help"}, tt.want...) {
+				if !containsFold(topicOutput, want) {
+					t.Errorf("help does not contain %q:\n%s", want, topicOutput)
+				}
+			}
+
+			rc, flagOutput, stderr := runCLI(t, bin, project, tt.command, "--help")
+			if rc != 0 {
+				t.Fatalf("--help returned %d: %s", rc, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("--help wrote unexpected stderr: %s", stderr)
+			}
+			if flagOutput != topicOutput {
+				t.Errorf("%s --help differs from help %s\n--help:\n%s\nhelp topic:\n%s", tt.command, tt.command, flagOutput, topicOutput)
+			}
+		})
+	}
+}
+
+func TestUnknownHelpTopic(t *testing.T) {
+	bin := buildBinary(t)
+	rc, stdout, stderr := runCLI(t, bin, t.TempDir(), "help", "not-a-command")
+	if rc != 2 {
+		t.Fatalf("expected exit 2, got %d", rc)
+	}
+	if stdout != "" {
+		t.Fatalf("unexpected stdout: %s", stdout)
+	}
+	if !containsFold(stderr, "unknown help topic") || !containsFold(stderr, "dmux-verify help") {
+		t.Fatalf("unexpected stderr: %s", stderr)
+	}
+}
+
 func TestInitAndFirstThreeStages(t *testing.T) {
 	bin := buildBinary(t)
 	project := t.TempDir()

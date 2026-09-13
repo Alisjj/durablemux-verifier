@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -25,7 +26,149 @@ import (
 )
 
 // Version is the dmux-verify CLI version.
-const Version = "0.1.3"
+const Version = "0.1.4"
+
+type helpOption struct {
+	name        string
+	description string
+}
+
+type commandHelp struct {
+	name        string
+	usage       string
+	summary     string
+	description string
+	options     []helpOption
+	examples    []string
+}
+
+var globalHelpOptions = []helpOption{
+	{"--project DIR", "DurableMux project directory (default: current directory)."},
+	{"-V, --version", "Print the dmux-verify version and exit."},
+	{"-h, --help", "Show help and exit."},
+}
+
+var commandHelps = []commandHelp{
+	{
+		name:        "init",
+		usage:       "[--project DIR] init [--binary PATH] [--force]",
+		summary:     "Initialise verifier state for a project",
+		description: "Create .dmux-verifier configuration, progress state, and evidence storage. Existing progress is retained when --force replaces the configuration.",
+		options: []helpOption{
+			{"--binary PATH", "Path to the dmux executable, relative to the project (default: ./dmux)."},
+			{"--force", "Replace an existing verifier configuration."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux init --binary ./dmux",
+		},
+	},
+	{
+		name:        "doctor",
+		usage:       "[--project DIR] doctor",
+		summary:     "Check the environment and target binary",
+		description: "Check required tools, platform information, and whether the configured dmux binary exists and is executable.",
+		examples: []string{
+			"dmux-verify --project ./durablemux doctor",
+		},
+	},
+	{
+		name:        "status",
+		usage:       "[--project DIR] status [--json]",
+		summary:     "Show progress across all challenge stages",
+		description: "List every stage with its mode and current passed, ready, failed, or locked status.",
+		options: []helpOption{
+			{"--json", "Write machine-readable JSON instead of the progress table."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux status",
+			"dmux-verify --project ./durablemux status --json",
+		},
+	},
+	{
+		name:        "show",
+		usage:       "[--project DIR] show <stage>",
+		summary:     "Show the requirements for one stage",
+		description: "Display a stage's objective, contract, acceptance tests, questions, evidence requirement, and current status.",
+		examples: []string{
+			"dmux-verify --project ./durablemux show 11",
+		},
+	},
+	{
+		name:        "verify",
+		usage:       "[--project DIR] verify <stage|next> [--force]",
+		summary:     "Run verification checks for a stage",
+		description: "Run built-in and configured custom checks for a stage. Use next for the first incomplete stage. --force permits investigating a locked stage but does not complete its prerequisites.",
+		options: []helpOption{
+			{"--force", "Run a locked stage without marking its prerequisites complete."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux verify next",
+			"dmux-verify --project ./durablemux verify 14 --force",
+		},
+	},
+	{
+		name:        "evidence",
+		usage:       "[--project DIR] evidence <stage> (--file PATH | --command COMMAND) [--note TEXT]",
+		summary:     "Record evidence for a stage",
+		description: "Copy an existing artefact or execute a shell command and save its transcript under .dmux-verifier/evidence.",
+		options: []helpOption{
+			{"--file PATH", "Copy a file into the stage's evidence directory."},
+			{"--command COMMAND", "Run a shell command in the project and record its output."},
+			{"--note TEXT", "Attach a note describing the evidence."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux evidence 21 --file ./test-results/framing.txt --note \"Protocol tests\"",
+			"dmux-verify --project ./durablemux evidence 4 --command \"ps -ef\" --note \"Process snapshot\"",
+		},
+	},
+	{
+		name:        "approve",
+		usage:       "[--project DIR] approve <stage> --note TEXT",
+		summary:     "Approve manual evidence for a stage",
+		description: "Record manual review approval after the stage's minimum evidence requirement has been met.",
+		options: []helpOption{
+			{"--note TEXT", "Required explanation of what was reviewed and approved."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux approve 21 --note \"Framing acceptance cases pass\"",
+		},
+	},
+	{
+		name:        "report",
+		usage:       "[--project DIR] report [--output PATH]",
+		summary:     "Generate a Markdown progress report",
+		description: "Write a self-contained report of stage status, results, and evidence references.",
+		options: []helpOption{
+			{"--output PATH", "Output path, relative to the project (default: .dmux-verifier/report.md)."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux report",
+			"dmux-verify --project ./durablemux report --output ./progress.md",
+		},
+	},
+	{
+		name:        "reset",
+		usage:       "[--project DIR] reset --stage N",
+		summary:     "Reset saved state for one stage",
+		description: "Remove a stage's saved results, evidence references, and approval. Copied evidence files are not deleted.",
+		options: []helpOption{
+			{"--stage N", "Stage number to reset (required)."},
+		},
+		examples: []string{
+			"dmux-verify --project ./durablemux reset --stage 11",
+		},
+	},
+	{
+		name:        "help",
+		usage:       "help [command]",
+		summary:     "Show help for the CLI or a command",
+		description: "Show the full command overview or detailed help for one command.",
+		examples: []string{
+			"dmux-verify help",
+			"dmux-verify help verify",
+		},
+	},
+}
 
 // Run dispatches argv (without program name) and returns exit code.
 func Run(argv []string) int {
@@ -46,10 +189,21 @@ func Run(argv []string) int {
 		}
 	}
 	if len(rest) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dmux-verify [--project DIR] <init|doctor|status|show|verify|evidence|approve|report|reset>")
+		usage(os.Stderr)
 		return 2
 	}
 	cmd, args := rest[0], rest[1:]
+	if cmd == "--help" || cmd == "-h" {
+		usage(os.Stdout)
+		return 0
+	}
+	if cmd == "help" {
+		return cmdHelp(args)
+	}
+	if commandHelpFor(cmd) != nil && helpRequested(args) {
+		writeCommandHelp(os.Stdout, commandHelpFor(cmd))
+		return 0
+	}
 	switch cmd {
 	case "init":
 		return cmdInit(project, args)
@@ -69,18 +223,117 @@ func Run(argv []string) int {
 		return cmdReport(project, args)
 	case "reset":
 		return cmdReset(project, args)
-	case "--help", "-h", "help":
-		usage()
-		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+		fmt.Fprintln(os.Stderr, "Run 'dmux-verify help' to see available commands.")
 		return 2
 	}
 }
 
-func usage() {
-	fmt.Println("dmux-verify — progress verifier for the DurableMux challenge")
-	fmt.Println("commands: init doctor status show verify evidence approve report reset")
+func usage(w io.Writer) {
+	fmt.Fprintln(w, "dmux-verify — progress verifier for the DurableMux challenge")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  dmux-verify [global options] <command> [arguments]")
+	fmt.Fprintln(w, "  dmux-verify help [command]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Commands:")
+	for _, command := range commandHelps {
+		fmt.Fprintf(w, "  %-10s %s\n", command.name, command.summary)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Global options:")
+	writeHelpOptions(w, globalHelpOptions)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  dmux-verify --project ./durablemux init --binary ./dmux")
+	fmt.Fprintln(w, "  dmux-verify --project ./durablemux verify next")
+	fmt.Fprintln(w, "  dmux-verify --project ./durablemux status")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Run 'dmux-verify help <command>' for detailed command help.")
+}
+
+func cmdHelp(args []string) int {
+	if len(args) == 0 {
+		usage(os.Stdout)
+		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: dmux-verify help [command]")
+		return 2
+	}
+	if args[0] == "--help" || args[0] == "-h" {
+		writeCommandHelp(os.Stdout, commandHelpFor("help"))
+		return 0
+	}
+	command := commandHelpFor(args[0])
+	if command == nil {
+		fmt.Fprintf(os.Stderr, "unknown help topic: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "Run 'dmux-verify help' to see available commands.")
+		return 2
+	}
+	writeCommandHelp(os.Stdout, command)
+	return 0
+}
+
+func commandHelpFor(name string) *commandHelp {
+	for i := range commandHelps {
+		if commandHelps[i].name == name {
+			return &commandHelps[i]
+		}
+	}
+	return nil
+}
+
+func helpRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+func writeCommandHelp(w io.Writer, command *commandHelp) {
+	fmt.Fprintf(w, "dmux-verify %s — %s\n", command.name, command.summary)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintf(w, "  dmux-verify %s\n", command.usage)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, command.description)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Options:")
+	writeHelpOptions(w, command.options)
+	writeHelpOptions(w, []helpOption{{"-h, --help", "Show help for this command."}})
+	if command.name != "help" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Global option:")
+		writeHelpOptions(w, []helpOption{{"--project DIR", "DurableMux project directory (default: current directory)."}})
+	}
+	if len(command.examples) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Examples:")
+		for _, example := range command.examples {
+			fmt.Fprintf(w, "  %s\n", example)
+		}
+	}
+}
+
+func writeHelpOptions(w io.Writer, options []helpOption) {
+	for _, option := range options {
+		fmt.Fprintf(w, "  %-20s %s\n", option.name, option.description)
+	}
+}
+
+func newCommandFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		if command := commandHelpFor(name); command != nil {
+			writeCommandHelp(os.Stderr, command)
+		}
+	}
+	return fs
 }
 
 func projectPaths(project string) (root, meta, cfg, prog string) {
@@ -105,9 +358,9 @@ func loadAll(project string) (root, meta string, cfg map[string]any, stages map[
 }
 
 func cmdInit(project string, args []string) int {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	binary := fs.String("binary", "./dmux", "")
-	force := fs.Bool("force", false, "")
+	fs := newCommandFlagSet("init")
+	binary := fs.String("binary", "./dmux", "path to the dmux executable")
+	force := fs.Bool("force", false, "replace an existing verifier configuration")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -226,8 +479,8 @@ func cmdStatus(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "")
+	fs := newCommandFlagSet("status")
+	asJSON := fs.Bool("json", false, "write machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -475,10 +728,10 @@ func cmdEvidence(project string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Unknown stage: %d\n", n)
 		return 2
 	}
-	fs := flag.NewFlagSet("evidence", flag.ContinueOnError)
-	fileFlag := fs.String("file", "", "")
-	cmdFlag := fs.String("command", "", "")
-	note := fs.String("note", "", "")
+	fs := newCommandFlagSet("evidence")
+	fileFlag := fs.String("file", "", "copy a file as evidence")
+	cmdFlag := fs.String("command", "", "run a command and record its transcript")
+	note := fs.String("note", "", "describe the evidence")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -558,8 +811,8 @@ func cmdApprove(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, "invalid stage")
 		return 2
 	}
-	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
-	note := fs.String("note", "", "")
+	fs := newCommandFlagSet("approve")
+	note := fs.String("note", "", "explain what was reviewed and approved")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -594,8 +847,8 @@ func cmdApprove(project string, args []string) int {
 }
 
 func cmdReport(project string, args []string) int {
-	fs := flag.NewFlagSet("report", flag.ContinueOnError)
-	output := fs.String("output", "", "")
+	fs := newCommandFlagSet("report")
+	output := fs.String("output", "", "output path relative to the project")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -629,8 +882,8 @@ func cmdReport(project string, args []string) int {
 }
 
 func cmdReset(project string, args []string) int {
-	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
-	stageFlag := fs.Int("stage", 0, "")
+	fs := newCommandFlagSet("reset")
+	stageFlag := fs.Int("stage", 0, "stage number to reset")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
