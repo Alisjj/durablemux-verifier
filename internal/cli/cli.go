@@ -28,7 +28,7 @@ import (
 )
 
 // Version is the dmux-verify CLI version.
-const Version = "0.1.4"
+const Version = "0.1.5"
 
 type helpOption struct {
 	name        string
