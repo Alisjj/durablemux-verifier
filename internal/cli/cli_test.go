@@ -66,7 +66,7 @@ func TestTopLevelHelp(t *testing.T) {
 		}
 		for _, want := range []string{
 			"Usage:", "Commands:", "Global options:", "Examples:",
-			"init", "doctor", "status", "show", "verify", "evidence", "approve", "report", "reset", "help",
+			"init", "doctor", "status", "show", "verify", "evidence", "approve", "report", "reset", "update", "help",
 			"--project DIR", "--version", "dmux-verify help <command>",
 		} {
 			if !containsFold(stdout, want) {
@@ -92,6 +92,7 @@ func TestCommandHelp(t *testing.T) {
 		{"approve", []string{"approve <stage>", "--note TEXT"}},
 		{"report", []string{"--output PATH", ".dmux-verifier/report.md"}},
 		{"reset", []string{"--stage N", "Copied evidence files are not deleted"}},
+		{"update", []string{"--check", "--force", "SHA-256"}},
 		{"help", []string{"help [command]", "detailed help"}},
 	}
 	for _, tt := range tests {

@@ -22,6 +22,23 @@ go build -o dmux-verify ./cmd/dmux-verify
 go install ./cmd/dmux-verify   # installs as dmux-verify from GOPATH/bin
 ```
 
+## Updating
+
+Once installed, check for and install the latest release with:
+
+```bash
+dmux-verify update --check
+dmux-verify update
+```
+
+The updater downloads the release binary for the current operating system and architecture, verifies its GitHub SHA-256 digest, and atomically replaces the running executable. If the existing installation directory is not writable, rerun the command with the permissions used to install it.
+
+Versions before the updater was introduced require a one-time update through Go:
+
+```bash
+go install github.com/Alisjj/durablemux-verifier/cmd/dmux-verify@latest
+```
+
 ## Start
 
 Copy this verifier anywhere, then initialise it inside your DurableMux repository:

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/Alisjj/durablemux-verifier/internal/report"
 	"github.com/Alisjj/durablemux-verifier/internal/runner"
 	"github.com/Alisjj/durablemux-verifier/internal/store"
+	"github.com/Alisjj/durablemux-verifier/internal/updater"
 	"github.com/Alisjj/durablemux-verifier/internal/util"
 )
 
@@ -159,6 +161,20 @@ var commandHelps = []commandHelp{
 		},
 	},
 	{
+		name:        "update",
+		usage:       "update [--check] [--force]",
+		summary:     "Update dmux-verify to the latest release",
+		description: "Check GitHub for the latest stable release and securely replace this executable with the matching platform binary. The download is verified against its SHA-256 release digest.",
+		options: []helpOption{
+			{"--check", "Check for an update without installing it."},
+			{"--force", "Reinstall the latest release even when already up to date."},
+		},
+		examples: []string{
+			"dmux-verify update --check",
+			"dmux-verify update",
+		},
+	},
+	{
 		name:        "help",
 		usage:       "help [command]",
 		summary:     "Show help for the CLI or a command",
@@ -223,6 +239,8 @@ func Run(argv []string) int {
 		return cmdReport(project, args)
 	case "reset":
 		return cmdReset(project, args)
+	case "update":
+		return cmdUpdate(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		fmt.Fprintln(os.Stderr, "Run 'dmux-verify help' to see available commands.")
@@ -305,7 +323,7 @@ func writeCommandHelp(w io.Writer, command *commandHelp) {
 	fmt.Fprintln(w, "Options:")
 	writeHelpOptions(w, command.options)
 	writeHelpOptions(w, []helpOption{{"-h, --help", "Show help for this command."}})
-	if command.name != "help" {
+	if command.name != "help" && command.name != "update" {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Global option:")
 		writeHelpOptions(w, []helpOption{{"--project DIR", "DurableMux project directory (default: current directory)."}})
@@ -908,6 +926,63 @@ func cmdReset(project string, args []string) int {
 		return 1
 	}
 	fmt.Printf("Reset stage %d\n", *stageFlag)
+	return 0
+}
+
+func cmdUpdate(args []string) int {
+	fs := newCommandFlagSet("update")
+	checkOnly := fs.Bool("check", false, "check for an update without installing it")
+	force := fs.Bool("force", false, "reinstall the latest release")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument: %s\n", fs.Arg(0))
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	client := updater.NewClient()
+	latest, err := client.Latest(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Update check failed: %v\n", err)
+		return 1
+	}
+	comparison, err := updater.CompareVersions(Version, latest.Version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Update check failed: %v\n", err)
+		return 1
+	}
+	if comparison >= 0 && !*force {
+		if comparison == 0 {
+			fmt.Printf("dmux-verify %s is up to date.\n", Version)
+		} else {
+			fmt.Printf("dmux-verify %s is newer than the latest release (%s).\n", Version, latest.Version)
+		}
+		return 0
+	}
+	if *checkOnly {
+		if comparison < 0 {
+			fmt.Printf("Update available: %s -> %s\n", Version, latest.Version)
+			fmt.Println("Run 'dmux-verify update' to install it.")
+		} else {
+			fmt.Printf("dmux-verify %s is up to date.\n", Version)
+		}
+		return 0
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: locate current executable: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Updating dmux-verify %s -> %s (%s)...\n", Version, latest.Version, latest.AssetName)
+	if err := client.Install(ctx, latest, executable); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Updated dmux-verify to %s.\n", latest.Version)
 	return 0
 }
 
