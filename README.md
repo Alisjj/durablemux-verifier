@@ -4,12 +4,9 @@ A local progress system for the **Build Your Own Durable Terminal Multiplexer** 
 
 It runs your `dmux` executable as a black box, stores stage history, locks later stages until prerequisites pass, collects evidence for design-heavy stages, and generates a Markdown progress report.
 
-Two implementations share the same CLI and `.dmux-verifier/` layout (interchangeable):
+Single static binary with the guide + policies embedded; portable `darwin/arm64 + linux` (`doctor` no longer hard-fails off Linux; Linux-only checks gate at runtime).
 
-- `dmux-verify` — Go rewrite (default): single static binary, guide + policies embedded, portable `darwin/arm64 + linux` (`doctor` no longer hard-fails off Linux; Linux-only checks gate at runtime).
-- `dmux-verify-py` — original Python verifier (Linux, Python 3.10+ stdlib only, kept for reference).
-
-## Requirements (Go build — recommended)
+## Requirements
 
 - Go 1.21+ (toolchain auto-upgrades for `golang.org/x/sys` if needed)
 - Your `dmux` executable
@@ -22,16 +19,6 @@ make build          # produces ./dmux-verify (also syncs embedded resources)
 go build -o dmux-verify ./cmd/dmux-verify
 go install ./cmd/dmux-verify   # installs as dmux-verify from GOPATH/bin
 ```
-
-## Requirements (legacy Python)
-
-- Linux
-- Python 3.10+
-- Your `dmux` executable
-- Bash and standard Linux utilities
-- Go for the stage 37 checks
-
-The Python verifier itself uses only the Python standard library.
 
 ## Start
 
@@ -234,9 +221,7 @@ The verifier intentionally does not:
 From the verifier directory:
 
 ```bash
-make test        # go tests + python tests
-make test-go     # go test ./...
-make test-py     # python3 -m unittest discover -s tests -v
+go test ./...
 ```
 
 ## Included guide

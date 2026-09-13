@@ -1,6 +1,6 @@
 BINARY ?= dmux-verify
 
-.PHONY: build test test-go test-py vet sync-resources clean
+.PHONY: build test vet sync-resources clean
 
 build: sync-resources
 	go build -o $(BINARY) ./cmd/dmux-verify
@@ -8,13 +8,8 @@ build: sync-resources
 install:
 	go install ./cmd/dmux-verify
 
-test: test-go test-py
-
-test-go:
+test:
 	go test ./...
-
-test-py:
-	python3 -m unittest discover -s tests -v
 
 vet:
 	go vet ./...
