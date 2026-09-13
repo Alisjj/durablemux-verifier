@@ -1,0 +1,24 @@
+{
+  "binary": "./dmux",
+  "working_directory": ".",
+  "timeout_seconds": 8,
+  "detach_sequence": "\u0001d",
+  "runtime_environment": {
+    "XDG_RUNTIME_DIR": "{temp_runtime}",
+    "DMUX_RUNTIME_DIR": "{temp_runtime}/dmux"
+  },
+  "commands": {
+    "version": ["version"],
+    "help": ["help"],
+    "run": ["run", "--"],
+    "new": ["new", "{name}", "--"],
+    "attach": ["attach", "{name}"],
+    "list": ["list", "--json"],
+    "inspect": ["inspect", "{name}", "--json"],
+    "logs": ["logs", "{name}", "--tail", "{tail}"],
+    "kill": ["kill", "{name}"],
+    "daemon_start": ["daemon", "start"],
+    "daemon_stop": ["daemon", "stop"]
+  },
+  "custom_checks": {}
+}
