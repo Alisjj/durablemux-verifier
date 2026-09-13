@@ -14,18 +14,18 @@ import (
 	"strings"
 	"time"
 
-	"durablemux-verifier/internal/checks"
-	"durablemux-verifier/internal/config"
-	"durablemux-verifier/internal/guide"
-	"durablemux-verifier/internal/model"
-	"durablemux-verifier/internal/report"
-	"durablemux-verifier/internal/runner"
-	"durablemux-verifier/internal/store"
-	"durablemux-verifier/internal/util"
+	"github.com/Alisjj/durablemux-verifier/internal/checks"
+	"github.com/Alisjj/durablemux-verifier/internal/config"
+	"github.com/Alisjj/durablemux-verifier/internal/guide"
+	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/report"
+	"github.com/Alisjj/durablemux-verifier/internal/runner"
+	"github.com/Alisjj/durablemux-verifier/internal/store"
+	"github.com/Alisjj/durablemux-verifier/internal/util"
 )
 
-// Version mirrors dmux_verify/__init__.py.
-const Version = "0.1.0"
+// Version is the dmux-verify CLI version.
+const Version = "0.1.1"
 
 // Run dispatches argv (without program name) and returns exit code.
 func Run(argv []string) int {

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"durablemux-verifier/internal/guide"
+	"github.com/Alisjj/durablemux-verifier/internal/guide"
 )
 
 func buildBinary(t *testing.T) string {

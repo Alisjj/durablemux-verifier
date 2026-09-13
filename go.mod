@@ -1,4 +1,4 @@
-module durablemux-verifier
+module github.com/Alisjj/durablemux-verifier
 
 go 1.26.0
 

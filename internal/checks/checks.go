@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"durablemux-verifier/internal/model"
-	"durablemux-verifier/internal/runner"
-	"durablemux-verifier/internal/util"
+	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/runner"
+	"github.com/Alisjj/durablemux-verifier/internal/util"
 
 	"golang.org/x/sys/unix"
 )

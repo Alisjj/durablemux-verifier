@@ -14,8 +14,10 @@ Single static binary with the guide + policies embedded; portable `darwin/arm64 
 - Go toolchain for the stage 37 checks
 
 ```bash
+go install github.com/Alisjj/durablemux-verifier/cmd/dmux-verify@latest
+
+# Or build from a source checkout:
 make build          # produces ./dmux-verify (also syncs embedded resources)
-# or
 go build -o dmux-verify ./cmd/dmux-verify
 go install ./cmd/dmux-verify   # installs as dmux-verify from GOPATH/bin
 ```

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"durablemux-verifier/internal/cli"
+	"github.com/Alisjj/durablemux-verifier/internal/cli"
 )
 
 func main() {

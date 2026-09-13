@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"durablemux-verifier/internal/model"
-	"durablemux-verifier/internal/ptyproc"
-	"durablemux-verifier/internal/util"
+	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/ptyproc"
+	"github.com/Alisjj/durablemux-verifier/internal/util"
 )
 
 // CommandOutput mirrors Python runner.CommandOutput.

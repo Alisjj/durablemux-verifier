@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"durablemux-verifier/internal/model"
-	"durablemux-verifier/internal/store"
+	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/store"
 )
 
 // Markdown builds the progress report (parity with Python report.py).

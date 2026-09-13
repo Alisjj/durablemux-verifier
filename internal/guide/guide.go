@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/model"
 )
 
 //go:embed resources/durablemux-codecrafters-guide.md
