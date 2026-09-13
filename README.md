@@ -8,7 +8,7 @@ Single static binary with the guide + policies embedded; portable `darwin/arm64 
 
 ## Requirements
 
-- Go 1.21+ (toolchain auto-upgrades for `golang.org/x/sys` if needed)
+- Go 1.21+
 - Your `dmux` executable
 - Bash and standard utilities (`bash`, `stty`)
 - Go toolchain for the stage 37 checks
