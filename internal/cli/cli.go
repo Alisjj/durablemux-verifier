@@ -25,7 +25,7 @@ import (
 )
 
 // Version is the dmux-verify CLI version.
-const Version = "0.1.2"
+const Version = "0.1.3"
 
 // Run dispatches argv (without program name) and returns exit code.
 func Run(argv []string) int {
