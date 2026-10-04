@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"fmt"
+	"github.com/Alisjj/durablemux-verifier/internal/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,42 @@ func TestRunTimeoutKillsDescendantsHoldingOutputPipes(t *testing.T) {
 	}
 	if elapsed >= 1500*time.Millisecond {
 		t.Fatalf("100ms timeout waited %v for descendant", elapsed)
+	}
+}
+
+func TestReviewCleanupOnlySelectsItsGeneratedNames(t *testing.T) {
+	project := t.TempDir()
+	cfg := config.Default()
+	cfg["binary"] = "./dmux"
+	c, err := New(project, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	name := c.ReviewSessionName()
+	log := filepath.Join(project, "killed")
+	body := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+ list) printf '%%s\n' '[{"name":"normal-session"},{"name":"%s"},{"name":"%s-extra"}]' ;;
+ kill) printf '%%s\n' "$2" >> '%s' ;;
+esac
+`, name, name, log)
+	if err := os.WriteFile(c.Binary, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c.DiscoverSessions = true
+	c.Close()
+	c.Close()
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "normal-session") {
+		t.Fatal("cleanup selected an unrelated session")
+	}
+	rows := strings.Fields(string(raw))
+	if len(rows) != 2 || !strings.Contains(string(raw), name+"-extra") {
+		t.Fatalf("expected two review sessions exactly once, got %q", raw)
 	}
 }
 

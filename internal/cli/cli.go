@@ -21,6 +21,7 @@ import (
 	"github.com/Alisjj/durablemux-verifier/internal/guide"
 	"github.com/Alisjj/durablemux-verifier/internal/model"
 	"github.com/Alisjj/durablemux-verifier/internal/report"
+	"github.com/Alisjj/durablemux-verifier/internal/review"
 	"github.com/Alisjj/durablemux-verifier/internal/runner"
 	"github.com/Alisjj/durablemux-verifier/internal/store"
 	"github.com/Alisjj/durablemux-verifier/internal/updater"
@@ -28,7 +29,7 @@ import (
 )
 
 // Version is the dmux-verify CLI version.
-const Version = "0.1.5"
+const Version = "0.2.0"
 
 type helpOption struct {
 	name        string
@@ -122,6 +123,13 @@ var commandHelps = []commandHelp{
 			"dmux-verify --project ./durablemux evidence 21 --file ./test-results/framing.txt --note \"Protocol tests\"",
 			"dmux-verify --project ./durablemux evidence 4 --command \"ps -ef\" --note \"Process snapshot\"",
 		},
+	},
+	{
+		name:        "review",
+		usage:       "[--project DIR] review <stage|next>",
+		summary:     "Review requirements with guided prompts and live evidence",
+		description: "Run stage checks, walk through each human-reviewed requirement, capture command or live-terminal evidence, and record pass/fail observations. A complete review can then be approved and verified.",
+		examples:    []string{"dmux-verify --project ./durablemux review next", "dmux-verify --project ./durablemux review 10"},
 	},
 	{
 		name:        "approve",
@@ -235,6 +243,8 @@ func Run(argv []string) int {
 		return cmdEvidence(project, args)
 	case "approve":
 		return cmdApprove(project, args)
+	case "review":
+		return cmdReview(project, args, os.Stdin, os.Stdout)
 	case "report":
 		return cmdReport(project, args)
 	case "reset":
@@ -437,11 +447,13 @@ func cmdDoctor(project string) int {
 	goOK := which("go")
 	bashOK := which("bash")
 	sttyOK := which("stty")
+	pythonOK := which("python3")
 	list := []check{
 		{true, fmt.Sprintf("platform is %s/%s (portable build; Linux-only checks gate at runtime)", runtime.GOOS, runtime.GOARCH)},
 		{goOK, "Go is available (needed for stage 37)"},
 		{bashOK, "bash is available"},
 		{sttyOK, "stty is available"},
+		{pythonOK, "python3 is available (needed for terminal and session probes)"},
 		{binErr == nil, fmt.Sprintf("binary exists at %s", bin)},
 		{execOK, fmt.Sprintf("binary is executable: %s", bin)},
 	}
@@ -486,6 +498,9 @@ func stageStatus(n int, stages map[int]*model.Stage, st *store.Store) string {
 	}
 	item := st.Stage(n)
 	if s, ok := item["status"].(string); ok && s != "" {
+		if s == "passed" {
+			return "stale"
+		}
 		return s
 	}
 	return "ready"
@@ -530,7 +545,7 @@ func cmdStatus(project string, args []string) int {
 		}
 	}
 	fmt.Printf("DurableMux progress: %d/%d stages passed\n\n", passed, len(stages))
-	markers := map[string]string{"passed": "✓", "ready": "→", "failed": "✗", "locked": "·"}
+	markers := map[string]string{"passed": "✓", "ready": "→", "failed": "✗", "locked": "·", "stale": "!"}
 	for _, n := range keys {
 		status := stageStatus(n, stages, st)
 		m, ok := markers[status]
@@ -579,6 +594,13 @@ func cmdShow(project string, args []string) int {
 		}
 	}
 	fmt.Printf("\nRequired evidence: %d; currently recorded: %d\n", stage.MinimumEvidence, st.EvidenceCount(stage.Number))
+	if stage.Mode != "auto" {
+		fmt.Printf("\nGuided review requirements (%d)\n", len(stage.ReviewCriteria()))
+		for i, text := range stage.ReviewCriteria() {
+			fmt.Printf("%d. %s\n", i+1, text)
+		}
+		fmt.Printf("\nRun: dmux-verify review %d\n", stage.Number)
+	}
 	return 0
 }
 
@@ -645,6 +667,17 @@ func cmdVerify(project string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Binary not found: %s\n", binAbs)
 		return 2
 	}
+	sha, err := util.Sha256File(binAbs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if !force {
+		if err := verifyPrerequisites(root, cfg, stages, st, number, sha); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
 	fmt.Printf("Verifying stage %d: %s [%s]\n", number, stage.Title, stage.Mode)
 	ctx, err := runner.New(root, cfg)
 	if err != nil {
@@ -681,11 +714,16 @@ func cmdVerify(project string, args []string) int {
 			checksPassed = false
 		}
 	}
-	evidenceOK := st.EvidenceCount(number) >= stage.MinimumEvidence
-	approvalOK := stage.Mode == "auto" || st.Approved(number)
+	evidenceCount := review.EvidenceCount(st, number, root)
+	evidenceOK := evidenceCount >= stage.MinimumEvidence
+	reviewErr := review.Complete(stage, st, root, sha)
+	approvalOK := stage.Mode == "auto" || (st.Approved(number) && reviewErr == nil)
 	if stage.Mode == "manual" || stage.Mode == "hybrid" {
-		fmt.Printf("%s  evidence %d/%d\n", passNeed(evidenceOK), st.EvidenceCount(number), stage.MinimumEvidence)
+		fmt.Printf("%s  intact evidence %d/%d\n", passNeed(evidenceOK), evidenceCount, stage.MinimumEvidence)
 		fmt.Printf("%s  manual review approval\n", passNeed(approvalOK))
+		if reviewErr != nil {
+			fmt.Printf("      %s; run dmux-verify review %d\n", reviewErr, number)
+		}
 	}
 	passed := checksPassed && evidenceOK && approvalOK
 	checkDicts := []any{}
@@ -696,10 +734,9 @@ func cmdVerify(project string, args []string) int {
 			"stdout":           r.Stdout, "stderr": r.Stderr,
 		})
 	}
-	sha, _ := util.Sha256File(binAbs)
 	payload := map[string]any{
 		"at": store.UTCNow(), "passed": passed, "stage": number, "mode": stage.Mode,
-		"checks": checkDicts, "evidence_count": st.EvidenceCount(number),
+		"checks": checkDicts, "evidence_count": evidenceCount,
 		"manual_approved": st.Approved(number), "git_commit": gitOrNil(root), "binary_sha256": sha,
 	}
 	if err := st.RecordRun(number, payload); err != nil {
@@ -712,7 +749,7 @@ func cmdVerify(project string, args []string) int {
 		fmt.Printf("\nStage %d: NOT PASSED\n", number)
 	}
 	if (stage.Mode == "manual" || stage.Mode == "hybrid") && !approvalOK {
-		fmt.Printf("After reviewing the evidence, run: dmux-verify approve %d --note \"...\"\n", number)
+		fmt.Printf("Complete the guided review: dmux-verify review %d\n", number)
 	}
 	if passed {
 		return 0
@@ -762,7 +799,7 @@ func cmdEvidence(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	stamp := time.Now().UTC().Format("20060102T150405Z")
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	record := map[string]any{"at": store.UTCNow(), "note": *note}
 	if *fileFlag != "" {
 		src := *fileFlag
@@ -783,34 +820,43 @@ func cmdEvidence(project string, args []string) int {
 		record["type"] = "file"
 		record["path"] = rel
 	} else if *cmdFlag != "" {
-		c3 := exec.Command("sh", "-lc", *cmdFlag)
-		c3.Dir = root
-		soBuf, seBuf := &strings.Builder{}, &strings.Builder{}
-		c3.Stdout = soBuf
-		c3.Stderr = seBuf
-		rc := 0
-		if err := c3.Run(); err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				rc = ee.ExitCode()
-			} else {
-				rc = 1
-			}
+		_, _, cfg, _, _, err := loadAll(project)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
 		}
+		ctx, err := runner.New(root, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		ctx.DiscoverSessions = true
+		defer ctx.Close()
+		command := expandEvidenceCommand(ctx, *cmdFlag)
+		r := ctx.Run([]string{"sh", "-lc", command}, nil, 120*time.Second, "")
+		rc := r.ReturnCode
 		target := filepath.Join(evDir, stamp+"-command.txt")
-		content := fmt.Sprintf("$ %s\n\n[exit] %d\n\n[stdout]\n%s\n[stderr]\n%s", *cmdFlag, rc, soBuf.String(), seBuf.String())
+		content := fmt.Sprintf("$ %s\n\n[exit] %d\n[timeout] %v\n[runner error] %s\n\n[stdout]\n%s\n[stderr]\n%s", command, rc, r.TimedOut, r.Error, r.Stdout, r.Stderr)
 		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		rel, _ := filepath.Rel(root, target)
 		record["type"] = "command"
-		record["command"] = *cmdFlag
+		record["command"] = command
 		record["exit_code"] = rc
 		record["path"] = rel
 	} else {
 		fmt.Fprintln(os.Stderr, "Provide --file or --command")
 		return 2
 	}
+	path, _ := record["path"].(string)
+	sha, err := util.Sha256File(filepath.Join(root, path))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	record["sha256"] = sha
 	if err := st.AddEvidence(n, record); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -842,7 +888,7 @@ func cmdApprove(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: approve <stage> --note \"...\"")
 		return 2
 	}
-	_, _, _, stages, st, err := loadAll(project)
+	root, _, cfg, stages, st, err := loadAll(project)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -852,9 +898,24 @@ func cmdApprove(project string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Unknown stage: %d\n", n)
 		return 2
 	}
-	if st.EvidenceCount(n) < stage.MinimumEvidence {
+	if review.EvidenceCount(st, n, root) < stage.MinimumEvidence {
 		fmt.Fprintf(os.Stderr, "Stage %d requires at least %d evidence item(s) before approval.\n", n, stage.MinimumEvidence)
 		return 2
+	}
+	bin, _ := cfg["binary"].(string)
+	if !filepath.IsAbs(bin) {
+		bin = filepath.Join(root, bin)
+	}
+	sha, err := util.Sha256File(bin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if stage.Mode != "auto" {
+		if err := review.Complete(stage, st, root, sha); err != nil {
+			fmt.Fprintf(os.Stderr, "%s; run dmux-verify review %d first\n", err, n)
+			return 2
+		}
 	}
 	if err := st.Approve(n, *note); err != nil {
 		fmt.Fprintln(os.Stderr, err)

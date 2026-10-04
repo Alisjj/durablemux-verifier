@@ -2,10 +2,14 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+// Increment when older verification results no longer establish a stage pass.
+const VerificationRevision = 2
 
 // UTCNow mirrors state.utc_now (ISO-8601 UTC).
 func UTCNow() string {
@@ -80,11 +84,14 @@ func (s *Store) Stage(number int) map[string]any {
 
 // IsPassed reports status == "passed".
 func (s *Store) IsPassed(number int) bool {
-	return s.Stage(number)["status"] == "passed"
+	item := s.Stage(number)
+	run, _ := item["last_run"].(map[string]any)
+	return item["status"] == "passed" && fmt.Sprint(run["verification_revision"]) == fmt.Sprint(VerificationRevision)
 }
 
 // RecordRun appends history and updates status.
 func (s *Store) RecordRun(number int, payload map[string]any) error {
+	payload["verification_revision"] = VerificationRevision
 	item := s.Stage(number)
 	item["last_run"] = payload
 	hist, _ := item["history"].([]any)
@@ -93,6 +100,17 @@ func (s *Store) RecordRun(number int, payload map[string]any) error {
 		item["status"] = "passed"
 	} else {
 		item["status"] = "failed"
+	}
+	item["updated_at"] = UTCNow()
+	return s.Save()
+}
+
+func (s *Store) RecordReview(number int, review map[string]any) error {
+	item := s.Stage(number)
+	item["review"] = review
+	delete(item, "manual_approval")
+	if item["status"] == "passed" {
+		item["status"] = "ready"
 	}
 	item["updated_at"] = UTCNow()
 	return s.Save()

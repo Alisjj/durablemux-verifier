@@ -1,8 +1,10 @@
 package checks
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Alisjj/durablemux-verifier/internal/config"
@@ -11,12 +13,19 @@ import (
 )
 
 func TestTailOneIsBounded(t *testing.T) {
-	full := []byte("LOG01\nLOG19\nLOG20\n")
+	var lines strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&lines, "LOG%02d\n", i)
+	}
+	full := []byte(lines.String())
 	if tailOneIsBounded(full, full) {
 		t.Fatal("an implementation that ignores --tail must not pass")
 	}
 	if !tailOneIsBounded(full, []byte("LOG20\n")) {
 		t.Fatal("one final log line should pass")
+	}
+	if tailOneIsBounded([]byte("LOG20\npadding"), []byte("LOG20\n")) {
+		t.Fatal("losing earlier history must not pass")
 	}
 }
 
@@ -49,6 +58,7 @@ chmod 700 "$rt"
 if [ "$1" = new ]; then
   : > "$rt/state"
   chmod 600 "$rt/state"
+  python3 -c 'import os,socket; os.chdir(os.environ["DMUX_RUNTIME_DIR"]); s=socket.socket(socket.AF_UNIX); s.bind("control.sock"); os.chmod("control.sock",0o600)'
 fi
 exit 0
 `)
@@ -56,6 +66,24 @@ exit 0
 		if !result.Passed {
 			t.Fatalf("%s failed: %s", result.Name, result.Detail)
 		}
+	}
+}
+
+func TestStage33RejectsOverwritingSymlinkTarget(t *testing.T) {
+	results := runStage33WithScript(t, `
+rt=$DMUX_RUNTIME_DIR
+if [ -L "$rt" ]; then
+  printf compromised > "$rt/sentinel"
+  exit 2
+fi
+chmod 700 "$rt"
+exit 0
+`)
+	if results[1].Passed {
+		t.Fatal("overwriting the sentinel through a symlink must fail")
+	}
+	if results[0].Passed {
+		t.Fatal("an empty runtime cannot prove session permissions")
 	}
 }
 

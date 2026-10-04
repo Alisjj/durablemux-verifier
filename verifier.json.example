@@ -3,6 +3,7 @@
   "working_directory": ".",
   "timeout_seconds": 8,
   "detach_sequence": "\u0001d",
+  "literal_prefix_sequence": "\u0001\u0001",
   "runtime_environment": {
     "XDG_RUNTIME_DIR": "{temp_runtime}",
     "DMUX_RUNTIME_DIR": "{temp_runtime}/dmux"

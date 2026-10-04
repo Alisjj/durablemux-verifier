@@ -5,18 +5,23 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // Process wraps a child attached to a PTY master.
 type Process struct {
-	Cmd    *exec.Cmd
-	Master *os.File
-	Buffer []byte
-	Pid    int
+	Cmd      *exec.Cmd
+	Master   *os.File
+	Buffer   []byte
+	Pid      int
+	OuterTTY string
+	original *unix.Termios
 
 	readCh    chan []byte
 	readDone  chan struct{}
@@ -36,12 +41,29 @@ func Start(argv []string, cwd string, env []string, rows, cols int) (*Process, e
 	cmd.Dir = cwd
 	cmd.Env = env
 	ws := &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}
-	master, err := pty.StartWithSize(cmd, ws)
+	master, slave, err := pty.Open()
 	if err != nil {
+		return nil, err
+	}
+	defer slave.Close()
+	original, err := unix.IoctlGetTermios(int(slave.Fd()), ioctlGetTermios())
+	if err != nil {
+		master.Close()
+		return nil, err
+	}
+	if err := pty.Setsize(master, ws); err != nil {
+		master.Close()
+		return nil, err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		master.Close()
 		return nil, err
 	}
 	p := &Process{
 		Cmd: cmd, Master: master, Pid: cmd.Process.Pid,
+		OuterTTY: slave.Name(), original: original,
 		readCh: make(chan []byte, 1), readDone: make(chan struct{}),
 		waitCh: make(chan int, 1),
 	}
@@ -178,6 +200,11 @@ func (p *Process) Wait(timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if rc := p.Poll(); rc != nil {
+			// Collect trailing output before returning the exit status.
+			deadline := time.Now().Add(100 * time.Millisecond)
+			for !p.readEOF && time.Now().Before(deadline) {
+				p.ReadSome(10 * time.Millisecond)
+			}
 			return *rc, nil
 		}
 		p.ReadSome(50 * time.Millisecond)
@@ -203,10 +230,18 @@ func (p *Process) Terminate() {
 }
 
 // LFlag reads the PTY termios local flags (for ICANON/ECHO checks).
-// Returns 0 with error on platforms where termios is unavailable;
-// callers should treat error as skip, not fail.
+// An unavailable measurement cannot establish that a terminal check passed.
 func (p *Process) LFlag() (uint64, error) {
 	return lflagOf(p.Master.Fd())
+}
+
+// TerminalRestored compares the terminal with its actual startup configuration.
+func (p *Process) TerminalRestored() (bool, error) {
+	current, err := unix.IoctlGetTermios(int(p.Master.Fd()), ioctlGetTermios())
+	if err != nil {
+		return false, err
+	}
+	return reflect.DeepEqual(current, p.original), nil
 }
 
 // Close closes the master fd.

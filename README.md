@@ -10,7 +10,7 @@ Single static binary with the guide + policies embedded; portable `darwin/arm64 
 
 - Go 1.21+
 - Your `dmux` executable
-- Bash and standard utilities (`bash`, `stty`)
+- Bash, Python 3 and standard utilities (`bash`, `stty`)
 - Go toolchain for the stage 37 checks
 
 ```bash
@@ -84,6 +84,7 @@ dmux-verify --project ./durablemux status
 dmux-verify --project ./durablemux show 11
 dmux-verify --project ./durablemux verify next
 dmux-verify --project ./durablemux verify 11
+dmux-verify --project ./durablemux review 11
 dmux-verify --project ./durablemux report
 ```
 
@@ -98,8 +99,8 @@ dmux-verify --project ./durablemux verify 14 --force
 The challenge contains behaviours that can be tested entirely through the CLI and others that depend on your internal protocol, failure model or performance methodology.
 
 - **Auto:** the verifier runs all built-in black-box checks and marks the stage passed when they succeed.
-- **Hybrid:** built-in/custom checks must pass and you must record and approve evidence.
-- **Manual:** you supply test evidence or add custom commands, then approve the review.
+- **Hybrid:** built-in/custom checks must pass and every guided review requirement must have a passing observation backed by recorded evidence.
+- **Manual:** every contract/acceptance requirement and review question must be reviewed against evidence; configured custom checks must also pass.
 
 Built-in automation is included for stages:
 
@@ -108,6 +109,42 @@ Built-in automation is included for stages:
 ```
 
 Other stages remain fully trackable through evidence and custom checks rather than pretending that an implementation-specific property can be verified generically.
+
+Fully automated stages are **1–3, 5, 9, 14 and 18**. Stages **6–8, 10–13, 15–17, 20, 32, 33 and 37** combine built-in probes with guided review of the remaining requirements. In particular, successful CLI calls alone do not prove coordinator ownership, full-screen redraw, fuzzing or stress coverage.
+
+## Guided interactive review
+
+```bash
+dmux-verify --project ./durablemux review 10
+```
+
+The reviewer runs the stage's automated checks, then walks through the requirements that still need human observation. For each requirement you can:
+
+- **`c`** — capture a command's output;
+- **`l`** — launch a live terminal command, interact normally, resize the terminal, and return by exiting or detaching;
+- **`a`** — copy an existing artefact;
+- **`p` / `f` / `s`** — record pass, fail or skip, with an observation for pass/fail;
+- **`q`** — save progress and quit; rerunning the command resumes the review.
+
+Capture the experiment first, then record its observed result. A passing requirement must reference recorded evidence; existing evidence can be reused for several requirements covered by the same experiment. Pressing Enter keeps a saved result. Failed or skipped requirements prevent approval.
+
+Captured commands share one private runtime throughout the review. Use `{binary}` for the configured executable and `{session}` for a unique review-session name, for example:
+
+```text
+{binary} run -- bash
+{binary} new {session} -- bash
+{binary} attach {session}
+```
+
+Live captures preserve terminal input, output, window resizing and the transcript. Command captures have a 120-second timeout. Sessions using `{session}` or suffixes such as `{session}-a` are tracked for cleanup; discovery only selects this review's generated names.
+
+After all requirements pass, the reviewer asks for explicit approval. Complete the stage with:
+
+```bash
+dmux-verify --project ./durablemux verify 10
+```
+
+Reviews are bound to the target binary's SHA-256. Evidence is hashed and must still exist unchanged when approving or verifying. Rebuilds require review confirmation for the new binary. Old evidence without integrity metadata must be recorded again.
 
 ## Evidence workflow
 
@@ -127,16 +164,17 @@ dmux-verify --project ./durablemux evidence 21 \
   --note "Fragmented, coalesced, oversized and unknown-frame tests"
 ```
 
-After reviewing the artefact against the stage contract:
+Review the artefact against the individual requirements:
 
 ```bash
-dmux-verify --project ./durablemux approve 21 \
-  --note "All framing acceptance cases pass and allocations are bounded"
+dmux-verify --project ./durablemux review 21
 
 dmux-verify --project ./durablemux verify 21
 ```
 
 Evidence is copied under `.dmux-verifier/evidence/stage-NN/` so the report remains self-contained.
+
+`approve <stage> --note "..."` remains available after a complete guided review; evidence count alone cannot establish approval.
 
 ## Custom checks
 
@@ -192,6 +230,10 @@ If your syntax differs, edit the `commands` section in `config.json`. Placeholde
 
 For JSON output, the verifier accepts common aliases such as `id`/`session_id`, `state`/`status`, and `exit_code`/`exitCode`. These aliases are configurable under `json_fields`.
 
+JSON output must contain exactly one complete JSON value and no trailing diagnostics. Session IDs must be non-empty strings or positive integers, attached-client counts must be non-negative integers, and creation times must be RFC3339 strings or positive Unix timestamps. Exit records must distinguish running, normal exit, signal termination and failed execution. A rejected creation still needs an inspectable failed-before-execution record.
+
+Configure both `detach_sequence` and `literal_prefix_sequence` if your prefix/escape mechanism differs from the default `Ctrl+a d` / `Ctrl+a Ctrl+a`.
+
 ## Runtime isolation
 
 Every verification run receives a new private temporary runtime through both:
@@ -216,7 +258,9 @@ Every result records:
 - review approval;
 - timestamp.
 
-Passing an earlier stage does not prove it still passes after later changes. Re-run prior stages before a milestone or release.
+Normal verification reruns all earlier built-in and custom checks in fresh runtimes before testing the requested stage. A prior regression blocks completion and updates that stage's saved result. Earlier manual/hybrid reviews must also be valid and approved for the current binary. `--force` is an investigative run that skips prerequisite checks; it does not establish regression coverage.
+
+Passes recorded before the hardened verification revision are displayed as **stale** and do not unlock later stages. History and evidence are retained; re-verify stages with the new checks and complete their guided reviews where required.
 
 ## Progress report
 
@@ -230,7 +274,7 @@ This writes:
 .dmux-verifier/report.md
 ```
 
-It contains the stage table, results and evidence references and can be included in your portfolio repository.
+It contains the stage table, results, per-requirement review observations and evidence references and can be included in your portfolio repository.
 
 ## Safety boundaries
 

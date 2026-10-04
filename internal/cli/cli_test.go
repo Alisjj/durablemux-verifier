@@ -88,6 +88,7 @@ func TestCommandHelp(t *testing.T) {
 		{"status", []string{"--json", "machine-readable JSON"}},
 		{"show", []string{"show <stage>", "Acceptance tests"}},
 		{"verify", []string{"verify <stage|next>", "--force"}},
+		{"review", []string{"review <stage|next>", "live-terminal evidence"}},
 		{"evidence", []string{"--file PATH", "--command COMMAND", "--note TEXT"}},
 		{"approve", []string{"approve <stage>", "--note TEXT"}},
 		{"report", []string{"--output PATH", ".dmux-verifier/report.md"}},

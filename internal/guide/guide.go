@@ -109,23 +109,32 @@ func Parse(guideText, policiesText string) (map[int]*model.Stage, error) {
 			}
 		}
 		minEv := 0
+		var reviewRequirements []string
+		if arr, ok := pol["review_requirements"].([]any); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok {
+					reviewRequirements = append(reviewRequirements, s)
+				}
+			}
+		}
 		if v, ok := pol["minimum_evidence"]; ok {
 			if f, ok := v.(float64); ok {
 				minEv = int(f)
 			}
 		}
 		stages[number] = &model.Stage{
-			Number:          number,
-			Title:           title,
-			Module:          currentModule,
-			Objective:       cleanText(sections["Objective"]),
-			Contract:        cleanText(sections["Contract"]),
-			AcceptanceTests: cleanList(sections["Acceptance tests"]),
-			Study:           cleanList(sections["Study before implementation"]),
-			Questions:       cleanList(sections["Questions to answer"]),
-			Mode:            mode,
-			Checks:          checks,
-			MinimumEvidence: minEv,
+			Number:             number,
+			Title:              title,
+			Module:             currentModule,
+			Objective:          cleanText(sections["Objective"]),
+			Contract:           cleanText(sections["Contract"]),
+			AcceptanceTests:    cleanList(sections["Acceptance tests"]),
+			Study:              cleanList(sections["Study before implementation"]),
+			Questions:          cleanList(sections["Questions to answer"]),
+			Mode:               mode,
+			Checks:             checks,
+			MinimumEvidence:    minEv,
+			ReviewRequirements: reviewRequirements,
 		}
 	}
 	return stages, nil

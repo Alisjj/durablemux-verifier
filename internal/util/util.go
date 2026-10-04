@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -82,6 +83,13 @@ func ParseJSONOutput(text string) (any, error) {
 	dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(text)))
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("stdout contains more than one JSON value")
+		}
+		return nil, fmt.Errorf("stdout contains trailing non-JSON output: %w", err)
 	}
 	return v, nil
 }

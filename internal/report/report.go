@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/review"
 	"github.com/Alisjj/durablemux-verifier/internal/store"
 )
 
@@ -32,12 +33,14 @@ func Markdown(stages map[int]*model.Stage, s *store.Store) string {
 	for _, n := range sortedKeys(stages) {
 		st := stages[n]
 		item := s.Stage(n)
-		if item["last_run"] == nil && item["evidence"] == nil {
+		if item["last_run"] == nil && item["evidence"] == nil && item["review"] == nil {
 			continue
 		}
 		fmt.Fprintf(&b, "## Stage %d: %s\n\n", n, st.Title)
 		if run, ok := item["last_run"].(map[string]any); ok {
-			if run["passed"] == true {
+			if run["passed"] == true && !s.IsPassed(n) {
+				b.WriteString("Historical result: **PASS — re-verification required**\n\n")
+			} else if run["passed"] == true {
 				b.WriteString("Result: **PASS**\n\n")
 			} else {
 				b.WriteString("Result: **FAIL**\n\n")
@@ -50,6 +53,16 @@ func Markdown(stages map[int]*model.Stage, s *store.Store) string {
 							icon = "PASS"
 						}
 						fmt.Fprintf(&b, "- **%s:** %v — %v\n", icon, m["name"], m["detail"])
+					}
+				}
+			}
+		}
+		if record, ok := item["review"].(map[string]any); ok {
+			fmt.Fprintf(&b, "\nGuided review (binary SHA-256: `%v`):\n\n", record["binary_sha256"])
+			if requirements, ok := record["requirements"].(map[string]any); ok {
+				for _, criterion := range st.ReviewCriteria() {
+					if requirement, ok := requirements[review.CriterionID(criterion)].(map[string]any); ok {
+						fmt.Fprintf(&b, "- **%v:** %v — %v (evidence: %v)\n", requirement["result"], strings.ReplaceAll(fmt.Sprint(requirement["text"]), "\n", " "), requirement["note"], requirement["evidence"])
 					}
 				}
 			}
@@ -84,6 +97,9 @@ func stageStatus(number int, stages map[int]*model.Stage, s *store.Store) string
 		return "passed"
 	}
 	status, _ := s.Stage(number)["status"].(string)
+	if status == "passed" {
+		return "stale"
+	}
 	if status != "" {
 		return status
 	}

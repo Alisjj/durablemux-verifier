@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,21 +24,28 @@ type CommandOutput struct {
 	Stdout     []byte
 	Stderr     []byte
 	Duration   time.Duration
+	TimedOut   bool
+	Error      string
 }
+
+func (o CommandOutput) Succeeded() bool { return !o.TimedOut && o.Error == "" && o.ReturnCode == 0 }
+func (o CommandOutput) Failed() bool    { return !o.TimedOut && o.Error == "" && o.ReturnCode != 0 }
 
 // Context is an isolated verification run: private temp runtime,
 // templated env, tracked sessions, guaranteed cleanup.
 type Context struct {
-	Project  string
-	Config   map[string]any
-	Workdir  string
-	Binary   string
-	Timeout  time.Duration
-	TempDir  string
-	Runtime  string
-	Env      []string
-	envMap   map[string]string
-	Sessions map[string]bool
+	Project          string
+	Config           map[string]any
+	Workdir          string
+	Binary           string
+	Timeout          time.Duration
+	TempDir          string
+	Runtime          string
+	Env              []string
+	envMap           map[string]string
+	Sessions         map[string]bool
+	DiscoverSessions bool
+	closeOnce        sync.Once
 }
 
 // New creates temp dirs and env. Call Close when done.
@@ -124,6 +132,13 @@ func withinDir(base, target string) bool {
 
 // Close kills sessions, stops daemon, cleans runtime procs and temp dir.
 func (c *Context) Close() {
+	c.closeOnce.Do(c.close)
+}
+
+func (c *Context) close() {
+	if c.DiscoverSessions {
+		c.discoverSessions()
+	}
 	for name := range c.Sessions {
 		_ = c.RunAction("kill", map[string]string{"name": name}, nil, nil, 2*time.Second)
 	}
@@ -134,9 +149,40 @@ func (c *Context) Close() {
 	os.RemoveAll(c.TempDir)
 }
 
+func (c *Context) discoverSessions() {
+	r := c.RunAction("list", nil, nil, nil, 2*time.Second)
+	if !r.Succeeded() {
+		return
+	}
+	payload, err := util.ParseJSONOutput(string(r.Stdout))
+	if err != nil {
+		return
+	}
+	rows, _ := payload.([]any)
+	if container, ok := payload.(map[string]any); ok {
+		for _, key := range util.StringAliases(c.Config, "json_fields", "sessions_container") {
+			if found, ok := container[key].([]any); ok {
+				rows = found
+				break
+			}
+		}
+	}
+	for _, row := range rows {
+		if session, ok := row.(map[string]any); ok {
+			if name, ok := util.GetAny(session, util.StringAliases(c.Config, "json_fields", "name")).(string); ok && (name == c.ReviewSessionName() || strings.HasPrefix(name, c.ReviewSessionName()+"-")) {
+				c.Sessions[name] = true
+			}
+		}
+	}
+}
+
 func (c *Context) commands() map[string]any {
 	m, _ := c.Config["commands"].(map[string]any)
 	return m
+}
+
+func (c *Context) ReviewSessionName() string {
+	return "verify-review-" + strings.TrimPrefix(filepath.Base(c.TempDir), "dmux-verifier-")
 }
 
 // Command expands a configured template, e.g. new -> [binary new {name} --].
@@ -164,7 +210,7 @@ func (c *Context) Command(action string, values map[string]string) ([]string, er
 func (c *Context) RunAction(action string, values map[string]string, extra []string, input []byte, timeout time.Duration) CommandOutput {
 	argv, err := c.Command(action, values)
 	if err != nil {
-		return CommandOutput{Argv: []string{action}, ReturnCode: 127, Stderr: []byte(err.Error())}
+		return CommandOutput{Argv: []string{action}, ReturnCode: 127, Stderr: []byte(err.Error()), Error: err.Error()}
 	}
 	argv = append(argv, extra...)
 	return c.Run(argv, input, timeout, "")
@@ -173,7 +219,7 @@ func (c *Context) RunAction(action string, values map[string]string, extra []str
 // Run executes argv with env + timeout. Timeout expiry yields exit 124.
 func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd string) CommandOutput {
 	if len(argv) == 0 || argv[0] == "" {
-		return CommandOutput{Argv: argv, ReturnCode: 127, Stderr: []byte("command must contain an executable")}
+		return CommandOutput{Argv: argv, ReturnCode: 127, Stderr: []byte("command must contain an executable"), Error: "command must contain an executable"}
 	}
 	if timeout <= 0 {
 		timeout = c.Timeout
@@ -211,6 +257,7 @@ func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd st
 	err := cmd.Run()
 	dur := time.Since(start)
 	rc := 0
+	runError := ""
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			rc = 124
@@ -218,10 +265,11 @@ func (c *Context) Run(argv []string, input []byte, timeout time.Duration, cwd st
 			rc = ee.ExitCode()
 		} else {
 			rc = 127
+			runError = err.Error()
 		}
 	}
 	// exec truncates output on kill; buffers hold what we got.
-	return CommandOutput{Argv: argv, ReturnCode: rc, Stdout: so.Bytes(), Stderr: se.Bytes(), Duration: dur}
+	return CommandOutput{Argv: argv, ReturnCode: rc, Stdout: so.Bytes(), Stderr: se.Bytes(), Duration: dur, TimedOut: ctx.Err() == context.DeadlineExceeded, Error: runError}
 }
 
 // Environment returns one environment value configured for this run.
