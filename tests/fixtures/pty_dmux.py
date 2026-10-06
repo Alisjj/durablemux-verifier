@@ -32,9 +32,13 @@ def main():
             print(error, file=sys.stderr, flush=True)
             os._exit(127)
 
+    resize_pending = True
+
     def resize(*_):
-        fcntl.ioctl(master, termios.TIOCSWINSZ,
-                    fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+        nonlocal resize_pending
+        # Apply the latest dimensions in the relay loop. Reentrant signal
+        # handlers can otherwise apply an older size after the final resize.
+        resize_pending = True
 
     def terminate(*_):
         try:
@@ -47,6 +51,10 @@ def main():
     try:
         tty.setraw(0)
         while True:
+            if resize_pending:
+                resize_pending = False
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
             ready, _, _ = select.select([0, master], [], [], 0.1)
             if master in ready:
                 try:
