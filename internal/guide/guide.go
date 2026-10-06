@@ -19,7 +19,6 @@ var embeddedPolicies string
 
 var (
 	stageRE   = regexp.MustCompile(`^## Stage (\d+): (.+)$`)
-	extRE     = regexp.MustCompile(`^## Extension (\d+): (.+)$`)
 	moduleRE  = regexp.MustCompile(`^# Module ([A-Z]) — (.+)$`)
 	sectionRE = regexp.MustCompile(`^(### (Objective|Contract|Acceptance tests|Study before implementation|Questions to answer))$`)
 	numListRE = regexp.MustCompile(`^\d+\.\s+`)
@@ -55,6 +54,16 @@ func cleanText(lines []string) string {
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
+func acceptanceTests(lines []string) []string {
+	if items := cleanList(lines); len(items) > 0 {
+		return items
+	}
+	if text := cleanText(lines); text != "" {
+		return []string{text}
+	}
+	return nil
+}
+
 // Parse builds stages from guide markdown + policies JSON text.
 func Parse(guideText, policiesText string) (map[int]*model.Stage, error) {
 	var policies map[string]map[string]any
@@ -84,8 +93,15 @@ func Parse(guideText, policiesText string) (map[int]*model.Stage, error) {
 		i++
 		sections := map[string][]string{}
 		currentSection := ""
-		for i < len(lines) && stageRE.FindString(lines[i]) == "" && extRE.FindString(lines[i]) == "" && moduleRE.FindString(lines[i]) == "" {
-			if sm := sectionRE.FindStringSubmatch(lines[i]); sm != nil {
+		inFence := false
+		for i < len(lines) {
+			if !inFence && (strings.HasPrefix(lines[i], "# ") || strings.HasPrefix(lines[i], "## ")) {
+				break
+			}
+			if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+				inFence = !inFence
+			}
+			if sm := sectionRE.FindStringSubmatch(lines[i]); !inFence && sm != nil {
 				currentSection = sm[2]
 				sections[currentSection] = []string{}
 				i++
@@ -128,7 +144,7 @@ func Parse(guideText, policiesText string) (map[int]*model.Stage, error) {
 			Module:             currentModule,
 			Objective:          cleanText(sections["Objective"]),
 			Contract:           cleanText(sections["Contract"]),
-			AcceptanceTests:    cleanList(sections["Acceptance tests"]),
+			AcceptanceTests:    acceptanceTests(sections["Acceptance tests"]),
 			Study:              cleanList(sections["Study before implementation"]),
 			Questions:          cleanList(sections["Questions to answer"]),
 			Mode:               mode,

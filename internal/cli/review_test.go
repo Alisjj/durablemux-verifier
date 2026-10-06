@@ -90,10 +90,10 @@ func TestGuidedReviewSavesPartialResultsAndResumes(t *testing.T) {
 	if rc, _, err := runCLI(t, bin, project, "init", "--binary", absPath(t, "tests/fixtures/fake_dmux.py")); rc != 0 {
 		t.Fatal(err)
 	}
-	if rc, out := runCLIInput(t, bin, project, "p\nProcess relationships observed\nc\nprintf process-evidence\nq\n", "review", "4"); rc != 1 || !strings.Contains(out, "Review saved") {
+	if rc, out := runCLIInput(t, bin, project, "p\nProcess relationships observed\nc\nprintf process-evidence\nq\n", "review", "19"); rc != 1 || !strings.Contains(out, "Review saved") {
 		t.Fatalf("partial review failed: %s", out)
 	}
-	if rc, _, _ := runCLI(t, bin, project, "verify", "4", "--force"); rc != 1 {
+	if rc, _, _ := runCLI(t, bin, project, "verify", "19", "--force"); rc != 1 {
 		t.Fatal("partial review passed")
 	}
 	stages, err := guide.LoadEmbedded()
@@ -101,14 +101,14 @@ func TestGuidedReviewSavesPartialResultsAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := "\n"
-	for i := 1; i < len(stages[4].ReviewCriteria()); i++ {
+	for i := 1; i < len(stages[19].ReviewCriteria()); i++ {
 		input += "p\nExplained from process evidence\n1\n"
 	}
 	input += "y\n"
-	if rc, out := runCLIInput(t, bin, project, input, "review", "4"); rc != 0 {
+	if rc, out := runCLIInput(t, bin, project, input, "review", "19"); rc != 0 {
 		t.Fatalf("resumed review failed: %s", out)
 	}
-	if rc, _, _ := runCLI(t, bin, project, "verify", "4", "--force"); rc != 0 {
+	if rc, _, _ := runCLI(t, bin, project, "verify", "19", "--force"); rc != 0 {
 		t.Fatal("complete resumed review did not pass")
 	}
 }
@@ -145,7 +145,7 @@ func TestLiveReviewReturnsToPromptsWithHealthyTerminal(t *testing.T) {
 	if rc, _, err := runCLI(t, bin, project, "init", "--binary", absPath(t, "tests/fixtures/fake_dmux.py")); rc != 0 {
 		t.Fatal(err)
 	}
-	p, err := ptyproc.Start([]string{bin, "--project", project, "review", "4"}, project, os.Environ(), 24, 80)
+	p, err := ptyproc.Start([]string{bin, "--project", project, "review", "19"}, project, os.Environ(), 24, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,9 @@ func TestLiveReviewReturnsToPromptsWithHealthyTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := `python3 -u -c 'print("__LIVE_READY__",flush=True); print("LIVE:"+input(),flush=True)'`
-	if err := p.Write([]byte("l\n" + command + "\n")); err != nil {
+	// Paste the command and its input together. Prompt buffering must not eat
+	// the hello line before the live terminal starts.
+	if err := p.Write([]byte("l\n" + command + "\nhello\n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.ReadUntil([]byte("Live command started."), 5*time.Second); err != nil {
@@ -162,9 +164,6 @@ func TestLiveReviewReturnsToPromptsWithHealthyTerminal(t *testing.T) {
 	}
 	// The ready marker can also appear in command echo; require the actual line.
 	if _, err := p.ReadUntil([]byte("\r\n__LIVE_READY__\r\n"), 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Write([]byte("hello\n")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.ReadUntil([]byte("LIVE:hello"), 5*time.Second); err != nil {
@@ -183,12 +182,12 @@ func TestLiveReviewReturnsToPromptsWithHealthyTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i < len(stages[4].ReviewCriteria()); i++ {
+	for i := 1; i < len(stages[19].ReviewCriteria()); i++ {
 		if err := p.Write([]byte("p\nExplained from live transcript\n1\n")); err != nil {
 			t.Fatal(err)
 		}
 		marker := "Approve all reviewed requirements?"
-		if i+1 < len(stages[4].ReviewCriteria()) {
+		if i+1 < len(stages[19].ReviewCriteria()) {
 			marker = fmt.Sprintf("[%d/", i+2)
 		}
 		if _, err := p.ReadUntil([]byte(marker), 5*time.Second); err != nil {
@@ -203,5 +202,75 @@ func TestLiveReviewReturnsToPromptsWithHealthyTerminal(t *testing.T) {
 	restored, err := p.TerminalRestored()
 	if err != nil || !restored {
 		t.Fatalf("terminal not restored: %v", err)
+	}
+}
+
+func TestStage4TreeExperimentCreatesReviewableEvidence(t *testing.T) {
+	bin := buildBinary(t)
+	project := t.TempDir()
+	if rc, _, err := runCLI(t, bin, project, "init", "--binary", absPath(t, "tests/fixtures/fake_dmux.py")); rc != 0 {
+		t.Fatal(err)
+	}
+	stages, err := guide.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := "t\np\nIdentified the invoking shell, exec-replaced invocation and live child with their process fields\n"
+	for i := 1; i < len(stages[4].ReviewCriteria()); i++ {
+		input += "p\nExplained the relationships and descriptor observations in the snapshot\n1\n"
+	}
+	input += "y\n"
+	rc, out := runCLIInput(t, bin, project, input, "review", "4")
+	if rc != 0 {
+		t.Fatalf("stage 4 experiment failed:\n%s", out)
+	}
+	if !strings.Contains(out, "PID PPID PGID SID TPGID STAT TTY COMMAND") || !strings.Contains(out, "[standard descriptors]") {
+		t.Fatalf("incomplete process evidence:\n%s", out)
+	}
+	if rc, out, err := runCLI(t, bin, project, "verify", "4", "--force"); rc != 0 {
+		t.Fatalf("complete review failed verification: %s %s", out, err)
+	}
+	progressPath := filepath.Join(project, ".dmux-verifier", "progress.json")
+	before, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Looking at an approved review must not reset the pass or its approval.
+	if rc, _ := runCLIInput(t, bin, project, "q\n", "review", "4"); rc != 1 {
+		t.Fatal("quit did not save/return")
+	}
+	after, err := os.ReadFile(progressPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("viewing a review changed its saved state: %v", err)
+	}
+	if rc, out, err := runCLI(t, bin, project, "verify", "4", "--force"); rc != 0 {
+		t.Fatalf("viewing a review revoked its approval: %s %s", out, err)
+	}
+	if rc, _ := runCLIInput(t, bin, project, "s\nq\n", "review", "4"); rc != 1 {
+		t.Fatal("editing a review did not return")
+	}
+	if rc, _, _ := runCLI(t, bin, project, "verify", "4", "--force"); rc != 1 {
+		t.Fatal("editing a review retained its approval")
+	}
+}
+
+func TestStage4RejectsFailedCaptureBeforeRecordingPass(t *testing.T) {
+	bin := buildBinary(t)
+	project := t.TempDir()
+	if rc, _, err := runCLI(t, bin, project, "init", "--binary", absPath(t, "tests/fixtures/fake_dmux.py")); rc != 0 {
+		t.Fatal(err)
+	}
+	if rc, out := runCLIInput(t, bin, project, "p\nProcess inspection pending\nq\n", "review", "4"); rc != 1 || !strings.Contains(out, "Review saved") {
+		t.Fatalf("quitting the evidence prompt did not return cleanly: %s", out)
+	}
+	if rc, _, _ := runCLI(t, bin, project, "evidence", "4", "--command", "printf process-evidence; exit 1"); rc != 0 {
+		t.Fatal("capture failed")
+	}
+	rc, out := runCLIInput(t, bin, project, "p\nAttempted process inspection\n1\nq\n", "review", "4")
+	if rc != 1 || !strings.Contains(out, "failed process capture") {
+		t.Fatalf("failed capture was not rejected: %s", out)
+	}
+	if rc, _, _ := runCLI(t, bin, project, "approve", "4", "--note", "all good"); rc != 2 {
+		t.Fatal("failed capture permitted approval")
 	}
 }

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -19,18 +18,29 @@ import (
 )
 
 type reviewUI struct {
-	reader *bufio.Reader
 	input  io.Reader
 	output io.Writer
 }
 
 func (ui *reviewUI) prompt(text string) (string, error) {
 	fmt.Fprint(ui.output, text)
-	line, err := ui.reader.ReadString('\n')
-	if err != nil {
-		return "", err
+	// Do not read ahead: pasted live-command input must remain on the terminal
+	// for Interact rather than getting stranded in a buffered prompt reader.
+	var line strings.Builder
+	var b [1]byte
+	for {
+		_, err := io.ReadFull(ui.input, b[:])
+		if err != nil {
+			if err == io.EOF && line.Len() > 0 {
+				return strings.TrimSpace(line.String()), nil
+			}
+			return "", err
+		}
+		if b[0] == '\n' {
+			return strings.TrimSpace(line.String()), nil
+		}
+		line.WriteByte(b[0])
 	}
-	return strings.TrimSpace(line), nil
 }
 
 func cmdReview(project string, args []string, input io.Reader, output io.Writer) int {
@@ -64,7 +74,7 @@ func cmdReview(project string, args []string, input io.Reader, output io.Writer)
 		fmt.Fprintln(output, err)
 		return 1
 	}
-	ui := &reviewUI{reader: bufio.NewReader(input), input: input, output: output}
+	ui := &reviewUI{input: input, output: output}
 	fmt.Fprintf(output, "Stage %d: %s [%s]\n\n", n, stage.Title, stage.Mode)
 	fmt.Fprintf(output, "Binary: %s\nPrivate runtime: %s\nUse {binary} in captured commands for the configured executable.\n", ctx.Binary, ctx.Runtime)
 	results, err := runStageChecks(stage, ctx)
@@ -80,7 +90,7 @@ func cmdReview(project string, args []string, input io.Reader, output io.Writer)
 		}
 		fmt.Fprintf(output, "%s  %s — %s\n", label, result.Name, result.Detail)
 	}
-	// Each capture gets a fresh runtime, independent of automated probes.
+	// Review captures share a fresh runtime, independent of automated probes.
 	ctx.Close()
 	ctx, err = runner.New(root, cfg)
 	if err != nil {
@@ -92,33 +102,68 @@ func cmdReview(project string, args []string, input io.Reader, output io.Writer)
 	fmt.Fprintf(output, "\nReview runtime: %s\nReview session: %s\nCommands captured during this review share this runtime. Use {session} for sessions to clean up when review ends.\n", ctx.Runtime, ctx.ReviewSessionName())
 	criteria := stage.ReviewCriteria()
 	items := map[string]any{}
+	resuming := false
 	if previous, ok := s.Stage(n)["review"].(map[string]any); ok && previous["binary_sha256"] == sha {
 		if saved, ok := previous["requirements"].(map[string]any); ok {
-			items = saved
+			for id, item := range saved {
+				items[id] = item
+			}
+			resuming = true
 		}
 	}
 	record := map[string]any{"at": store.UTCNow(), "binary_sha256": sha, "requirements": items}
 	save := func() error { record["at"] = store.UTCNow(); return s.RecordReview(n, record) }
-	if err := save(); err != nil {
-		fmt.Fprintln(output, err)
-		return 1
+	if !resuming || (s.Approved(n) && review.Complete(stage, s, root, sha) != nil) {
+		if err := save(); err != nil {
+			fmt.Fprintln(output, err)
+			return 1
+		}
+	}
+	if n == 4 {
+		fmt.Fprintln(output, "Press t to run the process-tree experiment: capture shell, dmux invocation, sleep 30 and standard descriptors while the command is alive. The experiment returns automatically; then explain the observations.")
 	}
 	for i, text := range criteria {
 		id := review.CriterionID(text)
 		fmt.Fprintf(output, "\n[%d/%d] %s\n", i+1, len(criteria), text)
 		previous, _ := items[id].(map[string]any)
+		keepSaved := previous != nil
 		if previous != nil {
 			fmt.Fprintf(output, "Saved result: %v — %v\n", previous["result"], previous["note"])
+			if previous["result"] == "pass" {
+				path, _ := previous["evidence"].(string)
+				if err := review.CriterionEvidenceValid(stage, text, s, root, path); err != nil {
+					keepSaved = false
+					fmt.Fprintf(output, "Saved evidence needs attention: %s\nCapture or select valid evidence and record the result again.\n", err)
+				}
+			}
 		}
 		selectedEvidence := ""
 		for {
-			answer, err := ui.prompt("Result: [p]ass, [f]ail, [s]kip, [q]uit; collect evidence first with [c]apture, [l]ive or [a]rtefact (Enter keeps saved result): ")
+			prompt := "Result: [p]ass, [f]ail, [s]kip, [q]uit; collect evidence first with [c]apture, [l]ive or [a]rtefact"
+			if n == 4 {
+				prompt += ", [t]ree experiment"
+			}
+			answer, err := ui.prompt(prompt + " (Enter keeps saved result): ")
 			if err != nil || strings.EqualFold(answer, "q") {
 				fmt.Fprintln(output, "Review saved; resume with the same review command.")
 				return 1
 			}
 			if answer == "" && previous != nil {
-				break
+				if keepSaved {
+					break
+				}
+				fmt.Fprintln(output, "The saved pass needs valid evidence before it can be kept.")
+				continue
+			}
+			if n == 4 && strings.EqualFold(answer, "t") {
+				path, err := ui.captureProcessTree(ctx, s, root, meta)
+				if err != nil {
+					fmt.Fprintln(output, err)
+					continue
+				}
+				selectedEvidence = path
+				fmt.Fprintf(output, "Recorded evidence: %s\nNow record the observed result.\n", path)
+				continue
 			}
 			if kind := strings.ToLower(answer); kind == "c" || kind == "l" || kind == "a" {
 				prompt := "Command: "
@@ -171,6 +216,11 @@ func cmdReview(project string, args []string, input io.Reader, output io.Writer)
 					}
 					selectedEvidence = path
 				}
+				if err := review.CriterionEvidenceValid(stage, text, s, root, selectedEvidence); err != nil {
+					fmt.Fprintln(output, err)
+					selectedEvidence = ""
+					continue
+				}
 				item["evidence"] = selectedEvidence
 			} else if selectedEvidence != "" {
 				item["evidence"] = selectedEvidence
@@ -197,7 +247,11 @@ func cmdReview(project string, args []string, input io.Reader, output io.Writer)
 	}
 	answer, err := ui.prompt("\nApprove all reviewed requirements? [y/N]: ")
 	if err != nil || !strings.EqualFold(answer, "y") {
-		fmt.Fprintln(output, "Review saved without approval.")
+		if s.Approved(n) {
+			fmt.Fprintln(output, "Review unchanged; existing approval retained.")
+		} else {
+			fmt.Fprintln(output, "Review saved without approval.")
+		}
 		return 1
 	}
 	if err := s.Approve(n, fmt.Sprintf("Guided review of all %d requirements with recorded observations and evidence", len(criteria))); err != nil {
@@ -216,9 +270,16 @@ func (ui *reviewUI) selectEvidence(ctx *runner.Context, s *store.Store, root, me
 			ev, _ := value.(map[string]any)
 			fmt.Fprintf(ui.output, "  %d. %v — %v\n", i+1, ev["path"], ev["note"])
 		}
-		answer, err := ui.prompt("Choose a number, [c]apture command, [l]ive terminal, or [f]ile: ")
+		prompt := "Choose a number, [c]apture command, [l]ive terminal, [f]ile, or [q]uit"
+		if stage == 4 {
+			prompt += ", [t]ree experiment"
+		}
+		answer, err := ui.prompt(prompt + ": ")
 		if err != nil {
 			return "", err
+		}
+		if strings.EqualFold(answer, "q") {
+			return "", fmt.Errorf("Review saved; resume with the same review command.")
 		}
 		if i, err := strconv.Atoi(answer); err == nil && i > 0 && i <= len(evidence) {
 			ev, _ := evidence[i-1].(map[string]any)
@@ -230,11 +291,19 @@ func (ui *reviewUI) selectEvidence(ctx *runner.Context, s *store.Store, root, me
 			return path, nil
 		}
 		kind := strings.ToLower(answer)
+		if stage == 4 && kind == "t" {
+			path, err := ui.captureProcessTree(ctx, s, root, meta)
+			if err != nil {
+				fmt.Fprintln(ui.output, err)
+				continue
+			}
+			return path, nil
+		}
 		if kind != "c" && kind != "l" && kind != "f" {
-			fmt.Fprintln(ui.output, "Select evidence or a capture option.")
+			fmt.Fprintln(ui.output, "Select evidence, a capture option, or quit.")
 			continue
 		}
-		prompt := "Command: "
+		prompt = "Command: "
 		if kind == "f" {
 			prompt = "File path (relative to project): "
 		}
@@ -310,6 +379,7 @@ func (ui *reviewUI) captureEvidence(ctx *runner.Context, s *store.Store, root, m
 			return "", err
 		}
 		record["command"], record["exit_code"] = command, rc
+		record["timed_out"], record["runner_error"] = timedOut, runError
 	}
 	path, err := filepath.Rel(root, target)
 	if err != nil {

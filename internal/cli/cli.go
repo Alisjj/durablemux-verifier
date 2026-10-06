@@ -29,7 +29,7 @@ import (
 )
 
 // Version is the dmux-verify CLI version.
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 type helpOption struct {
 	name        string
@@ -121,15 +121,15 @@ var commandHelps = []commandHelp{
 		},
 		examples: []string{
 			"dmux-verify --project ./durablemux evidence 21 --file ./test-results/framing.txt --note \"Protocol tests\"",
-			"dmux-verify --project ./durablemux evidence 4 --command \"ps -ef\" --note \"Process snapshot\"",
+			"dmux-verify --project ./durablemux evidence 4 --file ./process-tree.txt --note \"Process snapshot\"",
 		},
 	},
 	{
 		name:        "review",
 		usage:       "[--project DIR] review <stage|next>",
 		summary:     "Review requirements with guided prompts and live evidence",
-		description: "Run stage checks, walk through each human-reviewed requirement, capture command or live-terminal evidence, and record pass/fail observations. A complete review can then be approved and verified.",
-		examples:    []string{"dmux-verify --project ./durablemux review next", "dmux-verify --project ./durablemux review 10"},
+		description: "Run stage checks, walk through each human-reviewed requirement, capture command or live-terminal evidence, and record pass/fail observations. Stage 4 offers a portable process-tree experiment with t. A complete review can then be approved and verified.",
+		examples:    []string{"dmux-verify --project ./durablemux review next", "dmux-verify --project ./durablemux review 4", "dmux-verify --project ./durablemux review 10"},
 	},
 	{
 		name:        "approve",
@@ -845,6 +845,7 @@ func cmdEvidence(project string, args []string) int {
 		record["type"] = "command"
 		record["command"] = command
 		record["exit_code"] = rc
+		record["timed_out"], record["runner_error"] = r.TimedOut, r.Error
 		record["path"] = rel
 	} else {
 		fmt.Fprintln(os.Stderr, "Provide --file or --command")

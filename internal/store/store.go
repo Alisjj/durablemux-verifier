@@ -11,6 +11,15 @@ import (
 // Increment when older verification results no longer establish a stage pass.
 const VerificationRevision = 2
 
+// Stage 4 previously omitted its process-snapshot acceptance test. Invalidate
+// that stage's old passes while preserving other stages and all history.
+func verificationRevision(number int) int {
+	if number == 4 && VerificationRevision < 3 {
+		return 3
+	}
+	return VerificationRevision
+}
+
 // UTCNow mirrors state.utc_now (ISO-8601 UTC).
 func UTCNow() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
@@ -86,12 +95,12 @@ func (s *Store) Stage(number int) map[string]any {
 func (s *Store) IsPassed(number int) bool {
 	item := s.Stage(number)
 	run, _ := item["last_run"].(map[string]any)
-	return item["status"] == "passed" && fmt.Sprint(run["verification_revision"]) == fmt.Sprint(VerificationRevision)
+	return item["status"] == "passed" && fmt.Sprint(run["verification_revision"]) == fmt.Sprint(verificationRevision(number))
 }
 
 // RecordRun appends history and updates status.
 func (s *Store) RecordRun(number int, payload map[string]any) error {
-	payload["verification_revision"] = VerificationRevision
+	payload["verification_revision"] = verificationRevision(number)
 	item := s.Stage(number)
 	item["last_run"] = payload
 	hist, _ := item["history"].([]any)

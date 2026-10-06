@@ -146,13 +146,25 @@ dmux-verify --project ./durablemux verify 10
 
 Reviews are bound to the target binary's SHA-256. Evidence is hashed and must still exist unchanged when approving or verifying. Rebuilds require review confirmation for the new binary. Old evidence without integrity metadata must be recorded again.
 
+### Stage 4: process-tree review
+
+```bash
+dmux-verify --project ./durablemux review 4
+```
+
+At the result or evidence-selection prompt, press **`t`** to run the process-tree experiment. It starts an isolated invoking shell, runs your configured `run` command with `sleep 30`, and captures **PID, PPID, PGID, SID, TPGID, STAT, TTY and command** while the child is alive. It also records standard-descriptor targets using `/proc` on Linux or `lsof` on macOS. The experiment cleans up its processes and returns automatically; explain the captured relationships before marking each requirement passed. If `dmux` exec-replaces itself, the snapshot identifies that shared PID explicitly.
+
+This works on Linux and macOS. The guide's Linux `ps` command uses `sid` and `cmd` fields that macOS does not support; the experiment obtains real session IDs with `getsid(PID)` rather than treating macOS `ps sess` pointers as session IDs. You can also import a plain-text snapshot with the same columns (`CMD` or `ARGS` may replace `COMMAND`). Failed commands, missing process fields, and snapshots without the invoking shell's live `sleep 30` process tree cannot support a passing process-tree requirement.
+
+Stage 4 reviews now include the guide's previously omitted acceptance test. Earlier stage-4 passes need review and re-verification; saved observations and evidence remain available. Opening an unchanged approved review preserves its approval and pass; recording a changed result requires fresh approval.
+
 ## Evidence workflow
 
-Record a command transcript:
+Record a command transcript on Linux while `dmux run -- sleep 30` is running in another terminal (the guided stage-4 experiment above handles this automatically on either platform):
 
 ```bash
 dmux-verify --project ./durablemux evidence 4 \
-  --command "ps -o pid,ppid,pgid,sid,tpgid,stat,tty,cmd" \
+  --command "ps -e -o pid,ppid,pgid,sid,tpgid,stat,tty,cmd" \
   --note "Captured while dmux run -- sleep 30 was active"
 ```
 

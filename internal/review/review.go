@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Alisjj/durablemux-verifier/internal/model"
+	"github.com/Alisjj/durablemux-verifier/internal/proctree"
 	"github.com/Alisjj/durablemux-verifier/internal/store"
 	"github.com/Alisjj/durablemux-verifier/internal/util"
 )
@@ -26,7 +27,11 @@ func Complete(stage *model.Stage, s *store.Store, root, binarySHA string) error 
 	}
 	items, _ := record["requirements"].(map[string]any)
 	criteria := stage.ReviewCriteria()
-	validated := map[string]bool{}
+	type evidenceKey struct {
+		path        string
+		processTree bool
+	}
+	validated := map[evidenceKey]bool{}
 	if len(criteria) == 0 {
 		return fmt.Errorf("stage has no review criteria")
 	}
@@ -39,14 +44,51 @@ func Complete(stage *model.Stage, s *store.Store, root, binarySHA string) error 
 			return fmt.Errorf("a passing requirement needs an observation: %s", text)
 		}
 		path, _ := item["evidence"].(string)
-		if !validated[path] {
-			if err := EvidenceValid(s, stage.Number, root, path); err != nil {
+		key := evidenceKey{path, needsProcessTree(stage, text)}
+		if !validated[key] {
+			if err := CriterionEvidenceValid(stage, text, s, root, path); err != nil {
 				return err
 			}
-			validated[path] = true
+			validated[key] = true
 		}
 	}
 	return nil
+}
+
+func needsProcessTree(stage *model.Stage, text string) bool {
+	return stage.Number == 4 && !strings.HasPrefix(text, "Explain:")
+}
+
+// CriterionEvidenceValid checks integrity and the stage-specific content needed
+// to support a passing requirement.
+func CriterionEvidenceValid(stage *model.Stage, text string, s *store.Store, root, path string) error {
+	if err := EvidenceValid(s, stage.Number, root, path); err != nil {
+		return err
+	}
+	if !needsProcessTree(stage, text) {
+		return nil
+	}
+	items, _ := s.Stage(4)["evidence"].([]any)
+	for _, value := range items {
+		ev, _ := value.(map[string]any)
+		if ev["path"] != path {
+			continue
+		}
+		if code, ok := ev["exit_code"]; ok && fmt.Sprint(code) != "0" {
+			return fmt.Errorf("stage 4 cannot pass with a failed process capture; use the tree experiment or import a successful snapshot")
+		}
+		if ev["timed_out"] == true {
+			return fmt.Errorf("stage 4 process capture timed out")
+		}
+		if message, ok := ev["runner_error"].(string); ok && message != "" {
+			return fmt.Errorf("stage 4 process capture failed: %s", message)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(root, path))
+	if err != nil {
+		return err
+	}
+	return proctree.ValidateText(data)
 }
 
 func EvidenceValid(s *store.Store, stage int, root, path string) error {
